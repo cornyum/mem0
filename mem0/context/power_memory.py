@@ -390,7 +390,31 @@ class PowerMemory(Memory):
                 pending_embed=False,
                 expected_entry_version_id=outcome.entry.entry_version_id,
             )
+            self._adopt_projection_payload(scope, memory_id, outcome.entry)
         return self._finalize_outcome(scope, outcome, project=False)
+
+    def _adopt_projection_payload(self, scope: ScopeIdentity, memory_id: str, entry: EntryVersionView) -> None:
+        """Merge the ctx pointer fields into the adopted vector row's
+        payload (read-merge-write — update replaces). Without entry_id in
+        the payload, recall's authoritative validation cannot see the
+        binding and would treat the row as unmanaged legacy."""
+        try:
+            current = self.vector_store.get(memory_id)
+            merged = dict(getattr(current, "payload", None) or {})
+            merged.update(
+                {
+                    "kind": entry.kind,
+                    "state": ACTIVE,
+                    "entry_id": entry.entry_id,
+                    "entry_version_id": entry.entry_version_id,
+                    "entry_content_hash": entry.entry_content_hash,
+                }
+            )
+            if entry.categories:
+                merged["categories"] = entry.categories
+            self.vector_store.update(memory_id, payload=merged)
+        except Exception:
+            logger.warning("adopt payload merge failed for %s; binding intact", memory_id, exc_info=True)
 
     @application_op("backfill")
     def backfill(self, *, batch_size: int = 500) -> Dict[str, Any]:

@@ -132,15 +132,50 @@ def build_mcp_server() -> "FastMCP":
 
 
 def mount_mcp(app):
-    """Mount the MCP streamable-HTTP endpoint at /mcp when fastmcp exists."""
+    """Mount the MCP streamable-HTTP endpoint at /mcp when fastmcp exists.
+
+    NOTE: fastmcp's session manager initializes in the app lifespan, and
+    Starlette does NOT run lifespans of mounted sub-apps — mounting under
+    the main server leaves the transport unusable. Use
+    :func:`create_standalone_app` (its own process/lifespan, e.g. the
+    compose `mem0-mcp` service) for a working endpoint; this mount is kept
+    only for embeddings where the host app adopts the lifespan."""
     if FastMCP is None:
         logger.info("fastmcp not installed; MCP projection disabled (pip install fastmcp)")
         return None
     try:
         mcp = build_mcp_server()
-        app.mount("/mcp", mcp.streamable_http_app())
+        app.mount("/mcp", mcp.http_app(path="/"))
         logger.info("MCP projection mounted at /mcp (%d tools)", len(MCP_TOOLS_ENABLED))
         return mcp
     except Exception:
         logger.warning("MCP projection failed to mount", exc_info=True)
         return None
+
+
+def create_standalone_app():
+    """Standalone MCP service app (own lifespan — the supported deployment:
+    `uvicorn mcp_standalone:app` / the compose mem0-mcp service). Same
+    whitelist tools, same in-process semantics."""
+    from contextlib import asynccontextmanager
+
+    from fastapi import FastAPI
+
+    if FastMCP is None:
+        raise RuntimeError("fastmcp is not installed")
+    mcp = build_mcp_server()
+    http_app = mcp.http_app(path="/")
+
+    @asynccontextmanager
+    async def lifespan(app):
+        # Importing the REST module runs initialize_state(DEFAULT_CONFIG) —
+        # the single env-driven construction path — giving this process the
+        # same configured memory instance (design §8.2 single-factory rule).
+        import main  # noqa: F401
+
+        async with http_app.lifespan(http_app):
+            yield
+
+    app = FastAPI(title="Agentar Memory MCP", lifespan=lifespan)
+    app.mount("/", http_app)
+    return app

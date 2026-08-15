@@ -507,7 +507,7 @@ def _dual_write_adopt(response, params: dict) -> None:
     try:
         import context_runtime
 
-        if context_runtime.get_ctx_write_mode() != "dual":
+        if context_runtime.get_ctx_write_mode() == "off":
             return
         memory = get_memory_instance()
         ids = {k: params.get(k) for k in ("user_id", "agent_id", "run_id", "tenant_id", "session_id") if params.get(k)}
@@ -743,10 +743,13 @@ def delete_memory(memory_id: str, purge: bool = False, _auth=Depends(verify_auth
         import context_runtime
 
         if context_runtime.get_ctx_write_mode() == "authoritative" and not purge:
-            get_memory_instance().retire_bound(memory_id, keep_projection=True)
-            return MessageResponse(
-                message="Memory deactivated (authoritative mode; pass purge=true for physical delete)"
-            )
+            deactivated = get_memory_instance().retire_bound(memory_id, keep_projection=True)
+            if deactivated is not None:
+                return MessageResponse(
+                    message="Memory deactivated (authoritative mode; pass purge=true for physical delete)"
+                )
+            # Unadopted legacy row: nothing authoritative to retire — fall
+            # through to the physical delete so the request is never a no-op.
         get_memory_instance().delete(memory_id=memory_id)
         _dual_write_sync(memory_id, text=None, retire=True)
         return MessageResponse(message="Memory deleted successfully")

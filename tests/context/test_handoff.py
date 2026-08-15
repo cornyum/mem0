@@ -89,7 +89,7 @@ class TestHandoffLifecycle:
         assert resolution["statements"][0]["text"] == "项目处于设计评审阶段"
 
     def test_zero_citations_rejected(self, memory):
-        fact = memory.remember("零引用事实", user_id="u1")
+        memory.remember("零引用事实", user_id="u1")
         prepared = memory.prepare_handoff(after=0, user_id="u1")
         with pytest.raises(ContextValidationError, match="1..32"):
             memory.commit_handoff(
@@ -116,7 +116,7 @@ class TestHandoffLifecycle:
     def test_retired_evidence_unavailable_on_continue(self, memory):
         fact = memory.remember("退役交接事实", user_id="u1")
         prepared = memory.prepare_handoff(after=0, user_id="u1")
-        committed = memory.commit_handoff(
+        memory.commit_handoff(
             prepared["handoff_id"],
             draft={"statements": [{"text": "退役后交接", "citations": [_citation(fact)]}]},
             user_id="u1",

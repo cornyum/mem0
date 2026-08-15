@@ -87,6 +87,45 @@ services:
       ports:
         - "9200:9200"
 
+  mem0-mcp:
+      # MCP projection as its own service (fastmcp needs its own ASGI
+      # lifespan; same image/env as the REST tier, same in-process tools).
+      build:
+        context: ..
+        dockerfile: server/dev.Dockerfile
+      restart: on-failure
+      networks:
+        - mem0_network
+      env_file:
+        - .env
+      volumes:
+        - .:/app
+        - ..:/repo
+      depends_on:
+        postgres:
+          condition: service_healthy
+        elasticsearch:
+          condition: service_healthy
+      command: >
+        sh -c "pip install -q 'elasticsearch>=8.17,<9' prometheus-client opentelemetry-api fastmcp 'fastapi==0.115.8' && pip install -q --force-reinstall --no-deps /repo && uvicorn mcp_standalone:app --host 0.0.0.0 --port 9000"
+      environment:
+        - PYTHONDONTWRITEBYTECODE=1
+        - PYTHONUNBUFFERED=1
+        - PYTHONPATH=
+        - APP_DB_NAME=mem0_app
+        - JWT_SECRET=${JWT_SECRET}
+        - AUTH_DISABLED=${AUTH_DISABLED:-false}
+        - MEM0_TELEMETRY=${MEM0_TELEMETRY:-false}
+        - VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER:-elasticsearch}
+        - ES_HOST=${ES_HOST:-elasticsearch}
+        - ES_PORT=${ES_PORT:-9200}
+        - ES_USER=${ES_USER:-elastic}
+        - ES_PASSWORD=${ES_PASSWORD:-es-dev-placeholder}
+        - ES_COLLECTION_NAME=${ES_COLLECTION_NAME:-agentar_mem0}
+        - ES_USE_SSL=${ES_USE_SSL:-false}
+      ports:
+        - "9100:9000"
+
   mem0-dashboard:
     build: ./dashboard
     ports:
