@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 STORAGE_MODE = parse_storage_mode()
 
-_lock = threading.Lock()
+_lock = threading.RLock()  # reentrant: register_v3_readiness holds it while building the sidecar
 _obs: Optional[Observability] = None
 _sidecar: Optional[HybridSidecar] = None
 

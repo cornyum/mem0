@@ -117,7 +117,14 @@ def _resolve_user_from_jwt(token: str, db: Session) -> User:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type.")
-    user = db.get(User, payload.get("sub"))
+    sub = payload.get("sub")
+    # JWT subjects are strings; the Uuid bind processor on MySQL/pymysql
+    # requires a real uuid.UUID or it raises ('str' has no attribute 'hex').
+    try:
+        sub = uuid.UUID(str(sub))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=401, detail="Malformed token subject.")
+    user = db.get(User, sub)
     if user is None:
         raise HTTPException(status_code=401, detail="User not found.")
     return user

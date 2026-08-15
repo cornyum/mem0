@@ -893,9 +893,13 @@ class WriteCoordinator:
         raise last or PrimaryUnavailableError("derived write failed")
 
     def _refresh(self) -> None:
-        """refresh=wait_for equivalent: make the head/event writes visible to
-        search before the caller sees success (design §5.2 step 5)."""
-        try:
-            self.store.client.indices.refresh(index=self.store.alias("head"))
-        except Exception:
-            logger.debug("post-publish refresh failed", exc_info=True)
+        """refresh=wait_for equivalent (design §5.2 step 5): make every
+        derived document — head AND event AND the scope watermark itself —
+        visible to SEARCH before the caller sees success. By-id GETs are
+        realtime, but the reconciler's scans and the /changes feed go through
+        _search, which only sees refreshed segments."""
+        for family in ("scope", "head", "event", "version"):
+            try:
+                self.store.client.indices.refresh(index=self.store.alias(family))
+            except Exception:
+                logger.debug("post-publish refresh failed for %s", family, exc_info=True)

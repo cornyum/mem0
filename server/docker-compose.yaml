@@ -16,12 +16,12 @@ services:
       - .:/app
       - ..:/repo
     depends_on:
-      postgres:
+      mysql:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
     command: >
-      sh -c "pip install -q 'elasticsearch>=8.17,<9' prometheus-client opentelemetry-api && pip install -q --force-reinstall --no-deps /repo && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+      sh -c "pip install -q 'elasticsearch>=8.17,<9' prometheus-client opentelemetry-api pymysql cryptography && pip install -q --force-reinstall --no-deps /repo && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
@@ -32,7 +32,19 @@ services:
       - AUTH_DISABLED=${AUTH_DISABLED:-false}
       - MEM0_TELEMETRY=${MEM0_TELEMETRY:-false}
       - MEM0_WORKERS=${MEM0_WORKERS:-1}
-      # Vector projection tier (design §3.2): ES 8.17 primary, pgvector fallback
+      # Application relational store: MySQL 8 (memory paths never touch it in
+      # ONLY_VDB; HYBRID adds the recall sidecar tables, design §3/§8)
+      - APP_DB_BACKEND=mysql
+      - APP_DB_HOST=mysql
+      - APP_DB_PORT=3306
+      - APP_DB_USER=mem0
+      - APP_DB_PASSWORD=mem0_dev_password
+      - APP_DB_NAME=mem0_app
+      - APP_TABLE_PREFIX=agentar_mem_app_
+      # v3 storage mode (design §3): ONLY_VDB default; switch to
+      # HYBRID_STORAGE to enable the SQL recall sidecar + FTS fallback
+      - MEMORY_STORAGE_MODE=${MEMORY_STORAGE_MODE:-ONLY_VDB}
+      # Primary store fixed to ES 8.17 + analysis-ik (design §3)
       - VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER:-elasticsearch}
       - ES_HOST=${ES_HOST:-elasticsearch}
       - ES_PORT=${ES_PORT:-9200}
@@ -60,6 +72,30 @@ services:
         - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
       ports:
         - "8432:5432"
+
+  mysql:
+      # Application relational store (design §3 verification env: MySQL 8).
+      # ONLY_VDB never creates memory tables here; HYBRID_STORAGE creates the
+      # two recall-sidecar tables via the startup ensure_schema (§8).
+      image: mysql:8.0
+      restart: on-failure
+      command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+      networks:
+        - mem0_network
+      environment:
+        - MYSQL_ROOT_PASSWORD=mem0_dev_root
+        - MYSQL_DATABASE=mem0_app
+        - MYSQL_USER=mem0
+        - MYSQL_PASSWORD=mem0_dev_password
+      volumes:
+        - mysql_db:/var/lib/mysql
+      healthcheck:
+        test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pmem0_dev_root"]
+        interval: 5s
+        timeout: 5s
+        retries: 20
+      ports:
+        - "8306:3306"
 
   elasticsearch:
       # Vector + BM25 projection tier (design §3.2, ADR-2) with the analysis-ik
@@ -102,12 +138,12 @@ services:
         - .:/app
         - ..:/repo
       depends_on:
-        postgres:
+        mysql:
           condition: service_healthy
         elasticsearch:
           condition: service_healthy
       command: >
-        sh -c "pip install -q 'elasticsearch>=8.17,<9' prometheus-client opentelemetry-api fastmcp 'fastapi==0.115.8' && pip install -q --force-reinstall --no-deps /repo && uvicorn mcp_standalone:app --host 0.0.0.0 --port 9000"
+        sh -c "pip install -q 'elasticsearch>=8.17,<9' prometheus-client opentelemetry-api fastmcp 'fastapi==0.115.8' pymysql cryptography && pip install -q --force-reinstall --no-deps /repo && uvicorn mcp_standalone:app --host 0.0.0.0 --port 9000"
       environment:
         - PYTHONDONTWRITEBYTECODE=1
         - PYTHONUNBUFFERED=1
@@ -116,6 +152,14 @@ services:
         - JWT_SECRET=${JWT_SECRET}
         - AUTH_DISABLED=${AUTH_DISABLED:-false}
         - MEM0_TELEMETRY=${MEM0_TELEMETRY:-false}
+        - APP_DB_BACKEND=mysql
+        - APP_DB_HOST=mysql
+        - APP_DB_PORT=3306
+        - APP_DB_USER=mem0
+        - APP_DB_PASSWORD=mem0_dev_password
+        - APP_DB_NAME=mem0_app
+        - APP_TABLE_PREFIX=agentar_mem_app_
+        - MEMORY_STORAGE_MODE=${MEMORY_STORAGE_MODE:-ONLY_VDB}
         - VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER:-elasticsearch}
         - ES_HOST=${ES_HOST:-elasticsearch}
         - ES_PORT=${ES_PORT:-9200}
@@ -147,6 +191,7 @@ services:
 
 volumes:
   postgres_db:
+  mysql_db:
   es_data:
 
 networks:

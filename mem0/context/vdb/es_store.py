@@ -336,6 +336,7 @@ class ElasticsearchMemoryStore:
         """Scopes touched after a timestamp — RecoveryReconciler input (§5.4)."""
         body = {
             "size": limit,
+            "seq_no_primary_term": True,
             "query": {"range": {"updated_at": {"gt": updated_after}}},
             "sort": [{"updated_at": {"order": "asc"}}],
         }
@@ -361,7 +362,9 @@ class ElasticsearchMemoryStore:
 
     def scan_all_scopes(self, *, limit: int = 1000) -> List[ScopeDoc]:
         """Every scope document — FallbackReconciler's sync unit list."""
-        resp = self._search("scope", {"size": limit, "query": {"match_all": {}}})
+        resp = self._search(
+            "scope", {"size": limit, "seq_no_primary_term": True, "query": {"match_all": {}}}
+        )
         out = []
         for hit in resp["hits"]["hits"]:
             src = hit["_source"]
@@ -737,7 +740,7 @@ class ElasticsearchMemoryStore:
         """elasticsearch-py 8.x accepts the body fields as kwargs; keep both
         shapes working (8.17 prefers kwargs)."""
         kwargs: Dict[str, Any] = {}
-        for key in ("size", "query", "knn", "sort"):
+        for key in ("size", "query", "knn", "sort", "seq_no_primary_term"):
             if key in body:
                 kwargs[key] = body[key]
         return kwargs or {"body": body}

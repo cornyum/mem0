@@ -53,12 +53,23 @@ class HybridSidecar:
             conn.execute(text(head_ddl))
             conn.execute(text(checkpoint_ddl))
             if self.dialect == "mysql":
-                conn.execute(
+                # Idempotent DDL: MySQL has no CREATE FULLTEXT IF NOT EXISTS and
+                # a duplicate CREATE waits on the metadata lock held by other
+                # pooled connections — check first, create only when missing.
+                existing = conn.execute(
                     text(
-                        f"CREATE FULLTEXT INDEX ft_{self.head_table[:40]}_searchable "
-                        f"ON {self.head_table} (searchable_text)"
+                        f"SELECT COUNT(*) FROM information_schema.statistics "
+                        f"WHERE table_schema = DATABASE() AND table_name = '{self.head_table}' "
+                        f"AND index_type = 'FULLTEXT'"
                     )
-                )
+                ).scalar()
+                if not existing:
+                    conn.execute(
+                        text(
+                            f"CREATE FULLTEXT INDEX ft_{self.head_table[:40]}_searchable "
+                            f"ON {self.head_table} (searchable_text)"
+                        )
+                    )
             elif self.dialect == "postgresql":
                 conn.execute(
                     text(

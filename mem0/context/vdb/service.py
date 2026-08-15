@@ -18,6 +18,7 @@ from pydantic import ValidationError as PydanticValidationError
 from mem0.configs.base import MemoryConfig
 from mem0.context.errors import (
     CapabilityNotSupportedError,
+    ContextError,
     ContextValidationError,
     EntryNotFoundError,
     EvidenceExpiredError,
@@ -39,6 +40,29 @@ from mem0.context.vdb.write import WriteCoordinator
 logger = logging.getLogger(__name__)
 
 MAX_QUERY_BYTES = 32 * 1024
+
+
+def translate_es_errors(fn):
+    """Write-path guard: an unclassified ES runtime failure surfaces as 503
+    primary_unavailable (design §7.4) instead of an opaque 500. Domain errors
+    (ContextError subclasses) pass through untouched."""
+    import functools
+
+    from mem0.context.vdb.errors import PrimaryUnavailableError, classify_elasticsearch_error
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except ContextError:
+            raise
+        except Exception as exc:
+            cls = classify_elasticsearch_error(exc)
+            raise PrimaryUnavailableError(
+                f"Elasticsearch write path failed ({cls}): {exc}", error_class=cls
+            ) from exc
+
+    return wrapper
 
 
 def _normalize_text(text: str) -> str:
@@ -146,13 +170,15 @@ class MemoryApplicationService:
         except PydanticValidationError as exc:
             raise ContextValidationError(f"Invalid memory config: {exc}") from exc
 
-        from mem0.embeddings.factory import EmbedderFactory
-        from mem0.llms.factory import LlmFactory
-        from mem0.reranker import RerankerFactory
+        from mem0.utils.factory import EmbedderFactory, LlmFactory, RerankerFactory
 
         embedder = None
         if config.embedder and config.embedder.provider != "null":
-            embedder = EmbedderFactory.create(config.embedder.provider, config.embedder.config)
+            embedder = EmbedderFactory.create(
+                config.embedder.provider,
+                config.embedder.config,
+                config.vector_store.config,
+            )
         llm = None
         if config.llm and config.llm.provider != "null":
             llm = LlmFactory.create(config.llm.provider, config.llm.config)
@@ -228,6 +254,7 @@ class MemoryApplicationService:
 
     # -- write path (design §5.1) -----------------------------------------------------
 
+    @translate_es_errors
     def remember(
         self,
         text: Optional[str] = None,
@@ -321,6 +348,7 @@ class MemoryApplicationService:
             results.append(self._to_remember_result(outcome).model_dump(mode="json"))
         return {"results": results}
 
+    @translate_es_errors
     def revise(
         self,
         entry_id: str,
@@ -350,6 +378,7 @@ class MemoryApplicationService:
         )
         return self._to_remember_result(outcome)
 
+    @translate_es_errors
     def retire(
         self,
         entry_id: str,
@@ -362,6 +391,7 @@ class MemoryApplicationService:
         outcome = self.writer.retire(scope, entry_id, reason=reason, expected_revision=expected_revision)
         return self._to_remember_result(outcome)
 
+    @translate_es_errors
     def reactivate(
         self,
         entry_id: str,
@@ -374,6 +404,7 @@ class MemoryApplicationService:
         outcome = self.writer.reactivate(scope, entry_id, reason=reason, expected_revision=expected_revision)
         return self._to_remember_result(outcome)
 
+    @translate_es_errors
     def purge(
         self,
         entry_id: str,
