@@ -228,7 +228,7 @@ class PowerMemory(Memory):
 ### 5.3 REST 契约（`/v1/*`）
 
 ```
-POST /v1/memory/remember|recall|retire|reactivate|expand · GET /v1/memory/changes
+POST /v1/memory/remember|recall|retire|reactivate|expand|changes   # 全 POST+JSON（PowerContext 契约风格，scope 不入访问日志查询串）
 GET  /v1/capabilities · GET /health/ready
 POST /v1/context/prepare（P1）
 P2：/v1/handoff/prepare|commit|continue · /v1/artifact-candidates/* · /v1/sources/content

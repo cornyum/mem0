@@ -26,6 +26,7 @@ from rate_limit import limiter
 from routers import api_keys as api_keys_router
 from routers import auth as auth_router
 from routers import categories as categories_router
+from routers import context_router
 from routers import entities as entities_router
 from routers import export as export_router
 from routers import requests as requests_router
@@ -103,8 +104,8 @@ SENSITIVE_CONFIG_KEYS = {
 SKIPPED_REQUEST_LOG_PATHS = {"/api/health", "/docs", "/redoc", "/openapi.json"}
 SKIPPED_REQUEST_LOG_PREFIXES = ("/requests",)
 
-BUNDLED_LLM_PROVIDERS = ("openai", "anthropic", "gemini")
-BUNDLED_EMBEDDER_PROVIDERS = ("openai", "gemini")
+BUNDLED_LLM_PROVIDERS = ("openai", "anthropic", "gemini", "null")
+BUNDLED_EMBEDDER_PROVIDERS = ("openai", "gemini", "null")
 
 
 def _warn_if_unconfigured() -> None:
@@ -244,6 +245,7 @@ app.include_router(entities_router.router)
 app.include_router(requests_router.router)
 app.include_router(categories_router.router)
 app.include_router(export_router.router)
+app.include_router(context_router.router)
 
 
 class Message(BaseModel):

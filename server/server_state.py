@@ -5,10 +5,11 @@ from copy import deepcopy
 from typing import Any, Callable, Dict
 
 from mem0 import Memory
+from mem0.context.power_memory import PowerMemory
 
 _state_lock = threading.RLock()
 _current_config: Dict[str, Any] = {}
-_memory_instance: Memory | None = None
+_memory_instance: PowerMemory | None = None
 _session_factory: Callable | None = None
 
 
@@ -138,6 +139,22 @@ def apply_category_instructions(config: Dict[str, Any]) -> Dict[str, Any]:
     return next_config
 
 
+def _build_memory(config: Dict[str, Any]) -> PowerMemory:
+    """Single construction point for the memory instance (design §8.2):
+    initialize_state and update_config share it, so context wiring (ctx
+    store, readiness probes) and any later post-construction wrapping are
+    applied on every hot rebuild — an update_config can never leave a
+    stale instance behind."""
+    import context_runtime
+
+    memory = PowerMemory.from_config(
+        apply_category_instructions(config),
+        ctx_store=context_runtime.get_context_store(),
+    )
+    context_runtime.set_memory_instance(memory)
+    return memory
+
+
 def initialize_state(default_config: Dict[str, Any]) -> None:
     global _current_config, _memory_instance
     with _state_lock:
@@ -145,7 +162,7 @@ def initialize_state(default_config: Dict[str, Any]) -> None:
         overrides = _load_overrides()
         if overrides:
             _current_config = _merge_config(_current_config, overrides)
-        _memory_instance = Memory.from_config(apply_category_instructions(_current_config))
+        _memory_instance = _build_memory(_current_config)
 
 
 def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -153,7 +170,7 @@ def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
     with _state_lock:
         next_config = _merge_config(_current_config, updates)
         _current_config = next_config
-        _memory_instance = Memory.from_config(apply_category_instructions(next_config))
+        _memory_instance = _build_memory(next_config)
         if updates:
             # Skip the read-modify-write for refresh-only calls (empty updates):
             # with multiple uvicorn workers there is no cross-process lock, so a

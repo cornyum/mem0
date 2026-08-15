@@ -59,6 +59,7 @@ class LlmFactory:
         "lmstudio": ("mem0.llms.lmstudio.LMStudioLLM", LMStudioConfig),
         "vllm": ("mem0.llms.vllm.VllmLLM", VllmConfig),
         "langchain": ("mem0.llms.langchain.LangchainLLM", BaseLlmConfig),
+        "null": ("mem0.llms.null_llm.NullLLM", BaseLlmConfig),
     }
 
     @classmethod
@@ -163,6 +164,7 @@ class EmbedderFactory:
         "langchain": "mem0.embeddings.langchain.LangchainEmbedding",
         "aws_bedrock": "mem0.embeddings.aws_bedrock.AWSBedrockEmbedding",
         "fastembed": "mem0.embeddings.fastembed.FastEmbedEmbedding",
+        "null": "mem0.embeddings.null_embedder.NullEmbedding",
     }
 
     @classmethod
