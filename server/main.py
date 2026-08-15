@@ -270,6 +270,10 @@ app.include_router(categories_router.router)
 app.include_router(export_router.router)
 app.include_router(context_router.router)
 
+from routers import review_inbox as review_inbox_router  # noqa: E402
+
+app.include_router(review_inbox_router.router)
+
 # MCP projection (design §6.2): mounted last, optional dependency.
 import mcp_server as mcp_server_module  # noqa: E402
 
@@ -521,12 +525,12 @@ def _dual_write_adopt(response, params: dict) -> None:
 
 
 def _dual_write_sync(memory_id: str, *, text: Optional[str], retire: bool) -> None:
-    """ctx_write_mode=dual: mirror legacy PUT (revise) / DELETE (retire)
-    onto the authoritative store for adopted rows."""
+    """ctx_write_mode in (dual, authoritative): mirror legacy PUT (revise) /
+    DELETE (retire) onto the authoritative store for adopted rows."""
     try:
         import context_runtime
 
-        if context_runtime.get_ctx_write_mode() != "dual":
+        if context_runtime.get_ctx_write_mode() == "off":
             return
         memory = get_memory_instance()
         if retire:
@@ -728,9 +732,21 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 
 
 @app.delete("/memories/{memory_id}", summary="Delete a memory", response_model=MessageResponse)
-def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
-    """Delete a specific memory by ID."""
+def delete_memory(memory_id: str, purge: bool = False, _auth=Depends(verify_auth)):
+    """Delete a memory by ID.
+
+    In authoritative mode DELETE defaults to logical deactivation (design
+    §5.4/P2): the vector row stays with state=inactive and the revision
+    history remains queryable; ``purge=true`` performs the physical
+    delete. Other modes keep the legacy physical-delete behaviour."""
     try:
+        import context_runtime
+
+        if context_runtime.get_ctx_write_mode() == "authoritative" and not purge:
+            get_memory_instance().retire_bound(memory_id, keep_projection=True)
+            return MessageResponse(
+                message="Memory deactivated (authoritative mode; pass purge=true for physical delete)"
+            )
         get_memory_instance().delete(memory_id=memory_id)
         _dual_write_sync(memory_id, text=None, retire=True)
         return MessageResponse(message="Memory deleted successfully")

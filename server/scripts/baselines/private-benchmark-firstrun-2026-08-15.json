@@ -1,0 +1,49 @@
+{
+  "config": {
+    "samples": 4,
+    "sessions_per_sample": 10,
+    "top_k": 10,
+    "judge_model": "qwen-plus-latest"
+  },
+  "ingest": {
+    "batches": 40,
+    "memories": 243,
+    "elapsed_s": 451.6
+  },
+  "recall": {
+    "questions": 757,
+    "errors": 0,
+    "latency_ms": [],
+    "p50_ms": 264.7,
+    "p95_ms": 307.5
+  },
+  "judge": {
+    "supported": 704,
+    "partial": 53,
+    "unsupported": 0,
+    "errors": 0,
+    "supported_rate": 0.93
+  },
+  "per_sample": [
+    {
+      "sample": "conv-26",
+      "sessions": 10,
+      "memories": 61
+    },
+    {
+      "sample": "conv-30",
+      "sessions": 10,
+      "memories": 64
+    },
+    {
+      "sample": "conv-41",
+      "sessions": 10,
+      "memories": 53
+    },
+    {
+      "sample": "conv-42",
+      "sessions": 10,
+      "memories": 65
+    }
+  ]
+}

@@ -69,7 +69,7 @@ def get_ctx_write_mode() -> str:
 
             row = session.get(Settings, CTX_WRITE_MODE_KEY)
             value = (row.value if row else None) or "off"
-            return value if value in ("off", "dual") else "off"
+            return value if value in ("off", "dual", "authoritative") else "off"
         finally:
             session.close()
     except Exception:

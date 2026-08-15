@@ -144,3 +144,18 @@ def test_ctx_write_mode_reads_settings_kv(store, monkeypatch):
         session.commit()
 
     assert context_runtime.get_ctx_write_mode() == "off"
+
+
+def test_retire_bound_keep_projection_flips_vector_state(power_memory):
+    """Authoritative-mode DELETE: vector row stays, payload state flips."""
+    vector_id = _insert_legacy_row(power_memory, "权威模式删除对象", user_id="u9")
+    adopted = power_memory.adopt_legacy(memory_id=vector_id, text="权威模式删除对象", user_id="u9")
+
+    result = power_memory.retire_bound(vector_id, keep_projection=True)
+
+    assert result.outcome == "updated"
+    head = power_memory.ctx_store.get_head(ScopeIdentity(user_id="u9"), adopted.entry.entry_id)
+    assert head["state"] == "inactive"
+    assert head["vector_id"] == vector_id  # binding kept
+    payload = power_memory.vector_store.get(vector_id).payload
+    assert payload["state"] == "inactive" and payload["data"] == "权威模式删除对象"

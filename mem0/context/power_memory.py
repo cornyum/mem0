@@ -42,7 +42,7 @@ from mem0.context.models import (
 from mem0.context.observability import Observability, application_op, shared_observability
 from mem0.context.prepared import DEFAULT_BUDGET_BYTES
 from mem0.context.scope import SCOPE_FIELDS, ScopeIdentity
-from mem0.context.store import ACTIVE, ContextStore, EntryVersionView, RememberOutcome
+from mem0.context.store import ACTIVE, INACTIVE, ContextStore, EntryVersionView, RememberOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -337,21 +337,26 @@ class PowerMemory(Memory):
         return self._finalize_outcome(scope, outcome, project=False)
 
     @application_op("retire_bound")
-    def retire_bound(self, memory_id: str) -> Optional[RememberResult]:
-        """Dual-write tombstone for legacy DELETE (design §5.4): retire the
-        authoritative entry bound to this vector row (the legacy path has
-        already deleted the vector itself)."""
+    def retire_bound(self, memory_id: str, *, keep_projection: bool = False) -> Optional[RememberResult]:
+        """Tombstone for legacy DELETE (design §5.4): retire the
+        authoritative entry bound to this vector row. In dual mode the
+        legacy path already deleted the vector (binding cleared); in
+        authoritative mode (keep_projection=True) the vector row stays and
+        only its payload state flips to inactive."""
         head = self.ctx_store.get_head_by_vector_id(memory_id)
         if head is None:
             return None
         scope = ScopeIdentity(**{f: head.get(f) for f in SCOPE_FIELDS if head.get(f)})
         outcome = self.ctx_store.set_entry_state(scope, head["entry_id"], active=False)
         if outcome.outcome != OUTCOME_NOOP:
-            self.ctx_store.bind_vector(
-                scope, head["entry_id"],
-                vector_id=None, pending_embed=False,
-                expected_entry_version_id=head["entry_version_id"],
-            )
+            if keep_projection:
+                self._sync_vector_state(scope, head["entry_id"], INACTIVE)
+            else:
+                self.ctx_store.bind_vector(
+                    scope, head["entry_id"],
+                    vector_id=None, pending_embed=False,
+                    expected_entry_version_id=head["entry_version_id"],
+                )
         return self._finalize_outcome(scope, outcome, project=False)
 
     @application_op("adopt")
