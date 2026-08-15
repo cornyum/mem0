@@ -175,14 +175,12 @@ def main():
     crash_user = f"{run_id}_crash"
     status, created = http.post("/v1/memory/remember", {"user_id": crash_user, "text": "崩溃恢复验证事实", "mode": "append"})
     entry = created["results"][0]["entry"]
-    scope_key = status_body = None
     # find the head doc and delete it directly from ES (simulates lost derived write)
     status, found = es_req(args.es, "POST", f"/{args.es_prefix}_head/_search", {"size": 5, "query": {"term": {"entry_id": entry["entry_id"]}}})
     hits = found.get("hits", {}).get("hits", [])
     check("head doc present in ES", bool(hits))
     if hits:
         doc_id = hits[0]["_id"]
-        scope_key = hits[0]["_source"]["scope_key"]
         es_req(args.es, "DELETE", f"/{args.es_prefix}_head/_doc/{doc_id}", None)
         es_req(args.es, "POST", f"/{args.es_prefix}_head/_refresh")
         status, recalled = http.post("/v1/memory/recall", {"user_id": crash_user, "query": "崩溃恢复", "limit": 5})
@@ -232,7 +230,7 @@ def main():
             # make sure the SQL sidecar has replayed everything written so far
             status, sync = http.post("/v1/admin/memory/reconcile")
             print("  (sidecar sync:", sync.get("hybrid_sidecar"), ")")
-        stop = docker("stop", args.es_container)
+        docker("stop", args.es_container)
         time.sleep(3)
         try:
             if args.hybrid:
