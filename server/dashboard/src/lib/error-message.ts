@@ -2,7 +2,7 @@ import axios from "axios";
 
 export function getErrorMessage(
   err: unknown,
-  fallback = "Something went wrong",
+  fallback = "出错了，请稍后重试",
 ): string {
   if (axios.isAxiosError(err)) {
     const detail = err.response?.data?.detail;

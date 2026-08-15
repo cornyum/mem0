@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenSearchConfig(BaseModel):
-    collection_name: str = Field("mem0", description="Name of the index")
+    collection_name: str = Field("agentar_mem0", description="Name of the index")
     host: str = Field("localhost", description="OpenSearch host")
     port: int = Field(9200, description="OpenSearch port")
     user: Optional[str] = Field(None, description="Username for authentication")

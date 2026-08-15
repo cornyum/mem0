@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TurbopufferConfig(BaseModel):
-    collection_name: str = Field("mem0", description="Name of the namespace/collection")
+    collection_name: str = Field("agentar_mem0", description="Name of the namespace/collection")
     embedding_model_dims: int = Field(1536, description="Dimensions of the embedding model")
     api_key: Optional[str] = Field(None, description="API key for Turbopuffer")
     region: str = Field("gcp-us-central1", description="Turbopuffer region (e.g., 'gcp-us-central1', 'aws-us-west-2')")

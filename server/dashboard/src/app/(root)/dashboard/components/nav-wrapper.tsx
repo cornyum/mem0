@@ -1,7 +1,7 @@
 "use client";
 
 import { MainNav } from "./main-nav";
-import { PanelRight, LogOut, Settings, HelpCircle } from "lucide-react";
+import { PanelRight, LogOut, Settings } from "lucide-react";
 import { useCallback } from "react";
 import {
   COLLAPSED_SIDEBAR_WIDTH,
@@ -20,11 +20,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from "@/components/ui/tooltip";
 import Link from "next/link";
 import { Building2 } from "lucide-react";
 
@@ -35,7 +30,8 @@ export default function NavWrapper() {
   );
   const { user, logout } = useAuth();
 
-  const instanceName = process.env.NEXT_PUBLIC_INSTANCE_NAME || "Mem0";
+  const instanceName =
+    process.env.NEXT_PUBLIC_INSTANCE_NAME || "Agentar 记忆平台";
 
   const handleToggle = useCallback(() => {
     dispatch(toggleSidebar());
@@ -115,7 +111,7 @@ export default function NavWrapper() {
                   >
                     <Link href="/dashboard/settings">
                       <Settings className="size-4 mr-2" />
-                      Settings
+                      设置
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator className="bg-memBorder-primary" />
@@ -124,7 +120,7 @@ export default function NavWrapper() {
                     className="typo-body-sm text-onSurface-default-primary hover:bg-surface-default-tertiary-hover focus:bg-surface-default-tertiary-hover cursor-pointer"
                   >
                     <LogOut className="size-4 mr-2" />
-                    Log out
+                    退出登录
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -145,29 +141,13 @@ export default function NavWrapper() {
             type="button"
             onClick={handleToggle}
             className="cursor-pointer text-onSurface-default-tertiary hover:text-onSurface-default-secondary"
-            aria-label={
-              isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
-            }
+            aria-label={isSidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
           >
             <PanelRight className="size-4" />
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <a
-                href="https://docs.mem0.ai/open-source/overview"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center justify-center text-onSurface-default-tertiary hover:text-onSurface-default-secondary"
-              >
-                <HelpCircle className="size-4 shrink-0" />
-              </a>
-            </TooltipTrigger>
-            <TooltipContent>Documentation</TooltipContent>
-          </Tooltip>
-        </div>
+        <div className="flex items-center gap-3" />
       </div>
     </>
   );

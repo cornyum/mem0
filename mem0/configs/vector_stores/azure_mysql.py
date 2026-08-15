@@ -16,7 +16,7 @@ class AzureMySQLConfig(BaseModel):
     user: str = Field(..., description="Database user")
     password: Optional[str] = Field(None, description="Database password (not required if using Azure credential)")
     database: str = Field(..., description="Database name")
-    collection_name: str = Field("mem0", description="Collection/table name")
+    collection_name: str = Field("agentar_mem0", description="Collection/table name")
     embedding_model_dims: int = Field(1536, description="Dimensions of the embedding model")
     use_azure_credential: bool = Field(
         False,

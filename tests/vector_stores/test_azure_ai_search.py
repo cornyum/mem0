@@ -77,7 +77,7 @@ def test_config_validation_valid():
     """Test valid configurations are accepted."""
     # Test minimal configuration
     config = AzureAISearchConfig(service_name="test-service", api_key="test-api-key", embedding_model_dims=768)
-    assert config.collection_name == "mem0"  # Default value
+    assert config.collection_name == "agentar_mem0"  # Default value
     assert config.service_name == "test-service"
     assert config.api_key == "test-api-key"
     assert config.embedding_model_dims == 768

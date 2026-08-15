@@ -20,7 +20,7 @@ class DatabricksConfig(BaseModel):
     catalog: str = Field(..., description="The Unity Catalog catalog name")
     schema: str = Field(..., description="The Unity Catalog schama name")
     table_name: str = Field(..., description="Source Delta table name")
-    collection_name: str = Field("mem0", description="Vector search index name")
+    collection_name: str = Field("agentar_mem0", description="Vector search index name")
     index_type: VectorIndexType = Field("DELTA_SYNC", description="Index type: DELTA_SYNC or DIRECT_ACCESS")
     embedding_model_endpoint_name: Optional[str] = Field(
         None, description="Embedding model endpoint for Databricks-computed embeddings"

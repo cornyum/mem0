@@ -8,7 +8,7 @@ class QdrantConfig(BaseModel):
 
     QdrantClient: ClassVar[type] = QdrantClient
 
-    collection_name: str = Field("mem0", description="Name of the collection")
+    collection_name: str = Field("agentar_mem0", description="Name of the collection")
     embedding_model_dims: Optional[int] = Field(1536, description="Dimensions of the embedding model")
     client: Optional[QdrantClient] = Field(None, description="Existing Qdrant client instance")
     host: Optional[str] = Field(None, description="Host address for Qdrant server")

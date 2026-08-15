@@ -61,7 +61,7 @@ class Databricks(VectorStoreBase):
         catalog: str = None,
         schema: str = None,
         table_name: str = None,
-        collection_name: str = "mem0",
+        collection_name: str = "agentar_mem0",
         index_type: str = "DELTA_SYNC",
         embedding_model_endpoint_name: Optional[str] = None,
         embedding_dimension: int = 1536,
@@ -84,7 +84,7 @@ class Databricks(VectorStoreBase):
             catalog (str): Unity Catalog catalog name.
             schema (str): Unity Catalog schema name.
             table_name (str): Source Delta table name.
-            collection_name (str, optional): Vector search index name (default: "mem0").
+            collection_name (str, optional): Vector search index name (default: "agentar_mem0").
             index_type (str, optional): Index type, either "DELTA_SYNC" or "DIRECT_ACCESS" (default: "DELTA_SYNC").
             embedding_model_endpoint_name (str, optional): Embedding model endpoint for Databricks-computed embeddings.
             embedding_dimension (int, optional): Vector embedding dimensions (default: 1536).

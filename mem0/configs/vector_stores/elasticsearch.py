@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ElasticsearchConfig(BaseModel):
-    collection_name: str = Field("mem0", description="Name of the index")
+    collection_name: str = Field("agentar_mem0", description="Name of the index")
     host: str = Field("localhost", description="Elasticsearch host")
     port: int = Field(9200, description="Elasticsearch port")
     user: Optional[str] = Field(None, description="Username for authentication")

@@ -45,7 +45,7 @@ class CassandraDB(VectorStoreBase):
         port: int = 9042,
         username: Optional[str] = None,
         password: Optional[str] = None,
-        keyspace: str = "mem0",
+        keyspace: str = "agentar_mem0",
         collection_name: str = "memories",
         embedding_model_dims: int = 1536,
         secure_connect_bundle: Optional[str] = None,
@@ -60,7 +60,7 @@ class CassandraDB(VectorStoreBase):
             port (int): Cassandra port (default: 9042)
             username (str, optional): Database username
             password (str, optional): Database password
-            keyspace (str): Keyspace name (default: "mem0")
+            keyspace (str): Keyspace name (default: "agentar_mem0")
             collection_name (str): Table name (default: "memories")
             embedding_model_dims (int): Dimension of the embedding vector (default: 1536)
             secure_connect_bundle (str, optional): Path to secure connect bundle for Astra DB

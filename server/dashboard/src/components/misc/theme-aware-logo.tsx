@@ -1,9 +1,5 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
-import Image from "next/image";
-import { useTheme } from "next-themes";
-
 export default function ThemeAwareLogo({
   width = 120,
   height = 40,
@@ -11,20 +7,27 @@ export default function ThemeAwareLogo({
   width?: number;
   height?: number;
 }) {
-  const [mounted, setMounted] = useState(false);
-  const { theme, resolvedTheme } = useTheme();
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  if (!mounted) {
-    return <div style={{ width, height }} />;
-  }
-
-  const currentTheme = theme === "system" ? resolvedTheme : theme;
-  const logoSrc =
-    currentTheme === "dark" ? "/images/dark.svg" : "/images/light.svg";
-
-  return <Image src={logoSrc} alt="Mem0.ai" width={width} height={height} />;
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox="0 0 360 80"
+      role="img"
+      aria-label="Agentar 记忆平台"
+      className="text-onSurface-default-primary"
+    >
+      <text
+        x="180"
+        y="40"
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fill="currentColor"
+        fontSize="44"
+        fontWeight="600"
+        letterSpacing="1"
+      >
+        Agentar 记忆平台
+      </text>
+    </svg>
+  );
 }

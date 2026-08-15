@@ -10,7 +10,7 @@ class ChromaDbConfig(BaseModel):
         raise ImportError("The 'chromadb' library is required. Please install it using 'pip install chromadb'.")
     Client: ClassVar[type] = Client
 
-    collection_name: str = Field("mem0", description="Default name for the collection/database")
+    collection_name: str = Field("agentar_mem0", description="Default name for the collection/database")
     client: Optional[Client] = Field(None, description="Existing ChromaDB client instance")
     path: Optional[str] = Field(None, description="Path to the database directory")
     host: Optional[str] = Field(None, description="Database connection remote host")

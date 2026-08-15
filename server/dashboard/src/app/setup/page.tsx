@@ -35,32 +35,24 @@ type BundledProviders = {
   embedder: string[];
 };
 
-const STEPS = [
-  "Admin Account",
-  "Providers",
-  "API Key",
-  "Use Case",
-  "Quick Test",
-];
+const STEPS = ["管理员账号", "服务商配置", "API 密钥", "使用场景", "快速测试"];
 const STEP_TITLES = [
-  "Create your admin account",
-  "Review provider configuration",
-  "Your API key",
-  "Tell us your use case",
-  "Test your setup",
+  "创建管理员账号",
+  "确认服务商配置",
+  "您的 API 密钥",
+  "告诉我们您的使用场景",
+  "测试您的配置",
 ];
-const SUPPORTED_PROVIDERS_URL =
-  "https://docs.mem0.ai/open-source/setup#supported-providers";
 
 const USE_CASE_PRESETS = [
-  "Personal assistant",
-  "Coding agent",
-  "Customer support",
-  "Research",
-  "Therapy / journaling",
+  "个人助理",
+  "编程智能体",
+  "客户支持",
+  "研究分析",
+  "心理陪伴 / 日记",
 ];
 
-const DEFAULT_TEST_MESSAGE = "I like to hike on weekends.";
+const DEFAULT_TEST_MESSAGE = "我喜欢在周末徒步。";
 
 export default function SetupPage() {
   const router = useRouter();
@@ -138,7 +130,7 @@ export default function SetupPage() {
         setProviders(providersRes.data);
       } catch (err) {
         if (active) {
-          setError(getErrorMessage(err, "Could not read server configuration"));
+          setError(getErrorMessage(err, "无法读取服务器配置"));
         }
       } finally {
         if (active) {
@@ -158,17 +150,17 @@ export default function SetupPage() {
     e.preventDefault();
 
     if (!isValidEmail(email)) {
-      setError("Enter a valid email address.");
+      setError("请输入有效的邮箱地址。");
       return;
     }
 
     if (password !== confirmPassword) {
-      setError("Passwords don't match");
+      setError("两次输入的密码不一致");
       return;
     }
 
     if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError("密码长度至少为 8 个字符");
       return;
     }
 
@@ -179,7 +171,7 @@ export default function SetupPage() {
       await register(name, email, password);
       setStep(1);
     } catch (err) {
-      setError(getErrorMessage(err, "Registration failed"));
+      setError(getErrorMessage(err, "注册失败"));
     } finally {
       setIsLoading(false);
     }
@@ -228,7 +220,7 @@ export default function SetupPage() {
       setInitialEmbedderModel(embedderModel);
       setStep(2);
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to save configuration"));
+      setError(getErrorMessage(err, "保存配置失败"));
     } finally {
       setIsLoading(false);
     }
@@ -241,11 +233,11 @@ export default function SetupPage() {
 
     try {
       const res = await api.post(API_KEY_ENDPOINTS.BASE, {
-        label: keyLabel.trim() || "My First Key",
+        label: keyLabel.trim() || "我的第一个密钥",
       });
       setApiKey(res.data.key);
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to create API key"));
+      setError(getErrorMessage(err, "创建 API 密钥失败"));
     } finally {
       setIsLoading(false);
     }
@@ -288,7 +280,7 @@ export default function SetupPage() {
           detail = JSON.parse(body).detail ?? body;
         } catch {}
         throw new Error(
-          `Test failed (${res.status}): ${detail || res.statusText}`,
+          `测试失败（${res.status}）：${detail || res.statusText}`,
         );
       }
 
@@ -297,7 +289,7 @@ export default function SetupPage() {
         .post(AUTH_ENDPOINTS.ONBOARDING_COMPLETE, { use_case: useCase })
         .catch(() => {});
     } catch (err) {
-      setError(getErrorMessage(err, "Test failed"));
+      setError(getErrorMessage(err, "测试失败"));
     } finally {
       setIsLoading(false);
     }
@@ -342,7 +334,7 @@ export default function SetupPage() {
               </h2>
               {isPrefillingConfig && step === 1 && (
                 <p className="text-xs text-onSurface-default-tertiary">
-                  Checking server configuration...
+                  正在检查服务器配置...
                 </p>
               )}
             </div>
@@ -353,16 +345,16 @@ export default function SetupPage() {
             {step === 0 && (
               <form onSubmit={handleStep1} className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-name">Name</Label>
+                  <Label htmlFor="setup-name">姓名</Label>
                   <Input
                     id="setup-name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Your name"
+                    placeholder="您的姓名"
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="setup-email">Email</Label>
+                  <Label htmlFor="setup-email">邮箱</Label>
                   <Input
                     id="setup-email"
                     type="email"
@@ -372,19 +364,17 @@ export default function SetupPage() {
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="setup-password">Password</Label>
+                  <Label htmlFor="setup-password">密码</Label>
                   <Input
                     id="setup-password"
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min 8 characters"
+                    placeholder="至少 8 个字符"
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="setup-confirm-password">
-                    Confirm Password
-                  </Label>
+                  <Label htmlFor="setup-confirm-password">确认密码</Label>
                   <Input
                     id="setup-confirm-password"
                     type="password"
@@ -397,7 +387,7 @@ export default function SetupPage() {
                   disabled={isLoading || !name || !email || !password}
                   className="w-full"
                 >
-                  {isLoading ? "Creating..." : "Create Admin Account"}
+                  {isLoading ? "创建中..." : "创建管理员账号"}
                 </Button>
               </form>
             )}
@@ -407,16 +397,15 @@ export default function SetupPage() {
                 {!serverHasLlmKey && (
                   <div className="rounded-md border border-memBorder-primary bg-surface-default-secondary p-3">
                     <p className="text-xs text-onSurface-default-tertiary">
-                      No LLM provider API key is configured on the server. Paste
-                      one below to continue — it will be saved to the server and
-                      used for all memory operations.
+                      服务器尚未配置 LLM 服务商的 API
+                      密钥。请在下方粘贴一个以继续——密钥将保存到服务器，并用于所有记忆操作。
                     </p>
                   </div>
                 )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <Label htmlFor="setup-llm-provider">LLM Provider</Label>
+                    <Label htmlFor="setup-llm-provider">LLM 服务商</Label>
                     <Select
                       value={llmProvider}
                       onValueChange={(value) => {
@@ -426,7 +415,7 @@ export default function SetupPage() {
                       disabled={!providers}
                     >
                       <SelectTrigger id="setup-llm-provider">
-                        <SelectValue placeholder="Select provider" />
+                        <SelectValue placeholder="请选择服务商" />
                       </SelectTrigger>
                       <SelectContent>
                         {providers?.llm.map((name) => (
@@ -438,7 +427,7 @@ export default function SetupPage() {
                     </Select>
                   </div>
                   <div className="space-y-1">
-                    <Label htmlFor="setup-llm-model">Model</Label>
+                    <Label htmlFor="setup-llm-model">模型</Label>
                     <Input
                       id="setup-llm-model"
                       value={llmModel}
@@ -450,28 +439,26 @@ export default function SetupPage() {
                 </div>
 
                 <div className="space-y-1">
-                  <Label htmlFor="setup-llm-api-key">LLM API Key</Label>
+                  <Label htmlFor="setup-llm-api-key">LLM API 密钥</Label>
                   <Input
                     id="setup-llm-api-key"
                     type="password"
                     value={llmApiKey}
                     onChange={(e) => setLlmApiKey(e.target.value)}
                     placeholder={
-                      serverHasLlmKey
-                        ? "Leave blank to keep existing key"
-                        : "sk-..."
+                      serverHasLlmKey ? "留空则保留现有密钥" : "sk-..."
                     }
                     className="font-mono text-sm"
                   />
                   <p className="text-xs text-onSurface-default-tertiary">
-                    Also used for the embedder when it shares the same provider.
+                    当嵌入模型使用相同服务商时，也将使用该密钥。
                   </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <Label htmlFor="setup-embedder-provider">
-                      Embedder Provider
+                      嵌入模型服务商
                     </Label>
                     <Select
                       value={embedderProvider}
@@ -479,7 +466,7 @@ export default function SetupPage() {
                       disabled={!providers}
                     >
                       <SelectTrigger id="setup-embedder-provider">
-                        <SelectValue placeholder="Select provider" />
+                        <SelectValue placeholder="请选择服务商" />
                       </SelectTrigger>
                       <SelectContent>
                         {providers?.embedder.map((name) => (
@@ -491,7 +478,7 @@ export default function SetupPage() {
                     </Select>
                   </div>
                   <div className="space-y-1">
-                    <Label htmlFor="setup-embedder-model">Model</Label>
+                    <Label htmlFor="setup-embedder-model">模型</Label>
                     <Input
                       id="setup-embedder-model"
                       value={embedderModel}
@@ -503,17 +490,7 @@ export default function SetupPage() {
                 </div>
 
                 <p className="text-xs text-onSurface-default-tertiary">
-                  Need another provider? Install its Python package and rebuild
-                  the image. See{" "}
-                  <a
-                    href={SUPPORTED_PROVIDERS_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline underline-offset-4 hover:text-onSurface-default-primary"
-                  >
-                    supported providers
-                  </a>
-                  .
+                  需要其他模型服务商？安装对应的 Python 包并重新构建镜像即可。
                 </p>
 
                 <Button
@@ -526,7 +503,7 @@ export default function SetupPage() {
                   }
                   className="w-full"
                 >
-                  {isLoading ? "Saving..." : "Save & Continue"}
+                  {isLoading ? "保存中..." : "保存并继续"}
                 </Button>
               </form>
             )}
@@ -534,16 +511,16 @@ export default function SetupPage() {
             {step === 2 && !apiKey && (
               <form onSubmit={handleStep3} className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-key-label">Label for this key</Label>
+                  <Label htmlFor="setup-key-label">密钥标签</Label>
                   <Input
                     id="setup-key-label"
                     value={keyLabel}
                     onChange={(e) => setKeyLabel(e.target.value)}
-                    placeholder="My First Key"
+                    placeholder="我的第一个密钥"
                   />
                 </div>
                 <Button type="submit" disabled={isLoading} className="w-full">
-                  {isLoading ? "Generating..." : "Generate API Key"}
+                  {isLoading ? "生成中..." : "生成 API 密钥"}
                 </Button>
               </form>
             )}
@@ -551,7 +528,7 @@ export default function SetupPage() {
             {step === 2 && apiKey && (
               <form onSubmit={handleContinueToUseCase} className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-api-key">Your API Key</Label>
+                  <Label htmlFor="setup-api-key">您的 API 密钥</Label>
                   <div className="flex gap-2">
                     <Input
                       id="setup-api-key"
@@ -576,11 +553,11 @@ export default function SetupPage() {
                     </CopyToClipboard>
                   </div>
                   <p className="text-xs text-onSurface-danger-primary">
-                    Save this key. You will not see it again.
+                    请妥善保存该密钥，它不会再次显示。
                   </p>
                 </div>
                 <Button type="submit" className="w-full">
-                  Continue
+                  继续
                 </Button>
               </form>
             )}
@@ -588,12 +565,12 @@ export default function SetupPage() {
             {step === 3 && (
               <div className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-use-case">Describe your use case</Label>
+                  <Label htmlFor="setup-use-case">描述您的使用场景</Label>
                   <textarea
                     id="setup-use-case"
                     value={useCase}
                     onChange={(e) => setUseCase(e.target.value)}
-                    placeholder="e.g. A personal assistant that remembers my preferences"
+                    placeholder="例如：一个能记住我偏好的个人助理"
                     className="flex w-full rounded-md border border-memBorder-primary bg-surface-default-primary px-3 py-2 text-sm placeholder:text-onSurface-default-tertiary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-memPurple-500 min-h-[80px] resize-y"
                   />
                 </div>
@@ -615,8 +592,7 @@ export default function SetupPage() {
                   ))}
                 </div>
                 <p className="text-xs text-onSurface-default-tertiary">
-                  We&apos;ll generate custom instructions that tell the memory
-                  extractor which facts to prioritize for your use case.
+                  我们将生成自定义指令，告诉记忆提取器在您的使用场景下应优先记录哪些信息。
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -625,7 +601,7 @@ export default function SetupPage() {
                     onClick={handleContinueToQuickTest}
                     className="flex-1"
                   >
-                    Skip
+                    跳过
                   </Button>
                   <Button
                     type="button"
@@ -646,28 +622,19 @@ export default function SetupPage() {
                           setTestMessage(res.data.test_message);
                         }
                       } catch (err) {
-                        setError(
-                          getErrorMessage(
-                            err,
-                            "Failed to generate instructions",
-                          ),
-                        );
+                        setError(getErrorMessage(err, "生成指令失败"));
                       } finally {
                         setIsGeneratingInstructions(false);
                       }
                     }}
                   >
-                    {isGeneratingInstructions
-                      ? "Generating instructions..."
-                      : "Generate instructions"}
+                    {isGeneratingInstructions ? "正在生成指令..." : "生成指令"}
                   </Button>
                 </div>
                 {customInstructions && (
                   <div className="space-y-3">
                     <div className="space-y-1">
-                      <Label htmlFor="setup-instructions">
-                        Generated instructions
-                      </Label>
+                      <Label htmlFor="setup-instructions">已生成的指令</Label>
                       <textarea
                         id="setup-instructions"
                         value={customInstructions}
@@ -687,16 +654,14 @@ export default function SetupPage() {
                           });
                           handleContinueToQuickTest();
                         } catch (err) {
-                          setError(
-                            getErrorMessage(err, "Failed to save instructions"),
-                          );
+                          setError(getErrorMessage(err, "保存指令失败"));
                         } finally {
                           setIsLoading(false);
                         }
                       }}
                       disabled={isLoading}
                     >
-                      {isLoading ? "Saving..." : "Save & Continue"}
+                      {isLoading ? "保存中..." : "保存并继续"}
                     </Button>
                   </div>
                 )}
@@ -709,11 +674,11 @@ export default function SetupPage() {
                 className="space-y-4"
               >
                 <div className="space-y-1">
-                  <Label>Test your setup</Label>
+                  <Label>测试您的配置</Label>
                   {!apiUrl && (
                     <p className="text-xs text-onSurface-danger-primary">
-                      NEXT_PUBLIC_API_URL is not set. Set it in .env and restart
-                      before running this test.
+                      未设置 NEXT_PUBLIC_API_URL。请在 .env
+                      中配置并重启后再运行此测试。
                     </p>
                   )}
                   <pre className="text-xs bg-surface-default-secondary p-3 rounded font-mono overflow-x-auto">{`curl -X POST ${apiUrl}/memories \\
@@ -728,28 +693,28 @@ export default function SetupPage() {
                       disabled={isLoading}
                       className="w-full"
                     >
-                      {isLoading ? "Testing..." : "Run Test"}
+                      {isLoading ? "测试中..." : "运行测试"}
                     </Button>
                     {error && (
                       <p className="text-xs text-onSurface-default-tertiary">
-                        Provider credentials or model wrong? Fix them in{" "}
+                        服务商凭证或模型配置有误？请在
                         <a
                           href="/dashboard/configuration"
                           className="underline underline-offset-4 hover:text-onSurface-default-primary"
                         >
-                          Configuration
-                        </a>{" "}
-                        and run the test again.
+                          配置页
+                        </a>
+                        中修正后重新运行测试。
                       </p>
                     )}
                   </>
                 ) : (
                   <div className="space-y-3">
                     <div className="flex items-center gap-2 text-sm text-onSurface-positive-primary">
-                      <Check className="size-4" /> Memory created successfully
+                      <Check className="size-4" /> 记忆创建成功
                     </div>
                     <Button type="submit" className="w-full">
-                      Go to Dashboard
+                      进入控制台
                     </Button>
                   </div>
                 )}

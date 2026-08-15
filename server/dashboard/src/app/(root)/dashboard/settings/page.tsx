@@ -45,10 +45,10 @@ export default function SettingsPage() {
         email: email.trim(),
       });
       await refreshUser();
-      toast({ title: "Profile updated", variant: "success" });
+      toast({ title: "资料已更新", variant: "success" });
     } catch (error) {
       toast({
-        title: "Failed to update profile",
+        title: "更新资料失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -60,7 +60,7 @@ export default function SettingsPage() {
   const handleChangePassword = async () => {
     if (newPassword !== confirmPassword) {
       toast({
-        title: "Passwords don't match",
+        title: "两次输入的密码不一致",
         variant: "destructive",
       });
       return;
@@ -75,10 +75,10 @@ export default function SettingsPage() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      toast({ title: "Password updated", variant: "success" });
+      toast({ title: "密码已更新", variant: "success" });
     } catch (error) {
       toast({
-        title: "Failed to update password",
+        title: "更新密码失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -89,17 +89,17 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold font-fustat">Settings</h1>
+      <h1 className="text-xl font-semibold font-fustat">设置</h1>
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">Profile</CardTitle>
+          <CardTitle className="text-sm">个人资料</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="settings-name" className="text-xs">
-                Name
+                姓名
               </Label>
               <Input
                 id="settings-name"
@@ -109,7 +109,7 @@ export default function SettingsPage() {
             </div>
             <div className="space-y-1">
               <Label htmlFor="settings-email" className="text-xs">
-                Email
+                邮箱
               </Label>
               <Input
                 id="settings-email"
@@ -123,19 +123,19 @@ export default function SettingsPage() {
             onClick={handleSaveProfile}
             disabled={!profileDirty || !profileValid || savingProfile}
           >
-            {savingProfile ? "Saving..." : "Save profile"}
+            {savingProfile ? "保存中..." : "保存资料"}
           </Button>
         </CardContent>
       </Card>
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">Password</CardTitle>
+          <CardTitle className="text-sm">密码</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1">
             <Label htmlFor="settings-current-password" className="text-xs">
-              Current password
+              当前密码
             </Label>
             <Input
               id="settings-current-password"
@@ -147,19 +147,19 @@ export default function SettingsPage() {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="settings-new-password" className="text-xs">
-                New password
+                新密码
               </Label>
               <Input
                 id="settings-new-password"
                 type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="Min 8 characters"
+                placeholder="至少 8 个字符"
               />
             </div>
             <div className="space-y-1">
               <Label htmlFor="settings-confirm-password" className="text-xs">
-                Confirm new password
+                确认新密码
               </Label>
               <Input
                 id="settings-confirm-password"
@@ -178,19 +178,19 @@ export default function SettingsPage() {
               savingPassword
             }
           >
-            {savingPassword ? "Saving..." : "Update password"}
+            {savingPassword ? "保存中..." : "更新密码"}
           </Button>
         </CardContent>
       </Card>
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">Appearance</CardTitle>
+          <CardTitle className="text-sm">外观</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex items-center gap-4">
             <span className="text-sm text-onSurface-default-secondary">
-              Theme
+              主题
             </span>
             <button
               onClick={() => setTheme("light")}

@@ -32,7 +32,7 @@ _SCORED_BY_VECTOR_METHODS = [
 
 
 class Langchain(VectorStoreBase):
-    def __init__(self, client: VectorStore, collection_name: str = "mem0"):
+    def __init__(self, client: VectorStore, collection_name: str = "agentar_mem0"):
         self.client = client
         self.collection_name = collection_name
 

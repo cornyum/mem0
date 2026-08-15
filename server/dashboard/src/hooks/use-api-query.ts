@@ -34,7 +34,7 @@ export function useApiQuery<T>(
     try {
       setData(await fetcherRef.current());
     } catch (err) {
-      const message = getErrorMessage(err, errorToast || "Request failed");
+      const message = getErrorMessage(err, errorToast || "请求失败");
       setError(message);
       if (errorToast) {
         toast({

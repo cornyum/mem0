@@ -11,6 +11,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
+from db import TABLE_PREFIX
+
 revision: str = "002"
 down_revision: Union[str, None] = "001"
 branch_labels: Union[str, Sequence[str], None] = None
@@ -18,8 +20,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    table = f"{TABLE_PREFIX}request_logs"
     op.create_table(
-        "request_logs",
+        table,
         sa.Column("id", sa.Uuid(), primary_key=True),
         sa.Column("method", sa.String(16), nullable=False),
         sa.Column("path", sa.String(512), nullable=False),
@@ -28,9 +31,10 @@ def upgrade() -> None:
         sa.Column("auth_type", sa.String(32), nullable=False, server_default="none"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_index("ix_request_logs_created_at", "request_logs", ["created_at"])
+    op.create_index(f"ix_{table}_created_at", table, ["created_at"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_request_logs_created_at", table_name="request_logs")
-    op.drop_table("request_logs")
+    table = f"{TABLE_PREFIX}request_logs"
+    op.drop_index(f"ix_{table}_created_at", table_name=table)
+    op.drop_table(table)

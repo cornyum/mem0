@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # TODO: Upgrade to latest pydantic version
 class RedisDBConfig(BaseModel):
     redis_url: str = Field(..., description="Redis URL")
-    collection_name: str = Field("mem0", description="Collection name")
+    collection_name: str = Field("agentar_mem0", description="Collection name")
     embedding_model_dims: int = Field(1536, description="Embedding model dimensions")
 
     @model_validator(mode="before")

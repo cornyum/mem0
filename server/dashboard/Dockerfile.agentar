@@ -1,0 +1,75 @@
+# Agentar 记忆平台 · 前端（dashboard）镜像
+# 基础镜像：阿里龙蜥 Anolis OS 8（x86_64）；Node 与 npm 依赖均走国内镜像源。
+# 构建（在 server/dashboard 目录执行）：
+#   docker build --platform linux/amd64 -f Dockerfile.agentar -t agentar-mem-dashboard:latest .
+# 龙蜥 Anolis OS 8（x86_64）。内网部署可用 --build-arg BASE_IMAGE=<私有仓库地址>/anolisos:8.8 覆盖
+ARG BASE_IMAGE=openanolis/anolisos:8.8
+ARG NODE_VERSION=v20.18.1
+
+FROM ${BASE_IMAGE} AS builder
+ARG NODE_VERSION
+
+RUN dnf install -y ca-certificates curl xz findutils && dnf clean all
+
+# Node.js（阿里云 nodejs-release 镜像源）
+ENV NODE_HOME=/usr/local/node
+RUN curl -fsSL https://mirrors.aliyun.com/nodejs-release/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz \
+        -o /tmp/node.tar.xz && \
+    mkdir -p ${NODE_HOME} && \
+    tar -xJf /tmp/node.tar.xz -C ${NODE_HOME} --strip-components=1 && \
+    rm -f /tmp/node.tar.xz
+ENV PATH=${NODE_HOME}/bin:${PATH}
+
+# pnpm（npm 直接安装，走 npmmirror 源；不用 corepack 以避开旧版签名密钥兼容问题）
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm install -g pnpm@10.34.2 --registry=https://registry.npmmirror.com
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
+
+COPY . .
+
+# 占位值：容器启动时由 entrypoint.sh 替换为真实环境变量
+ENV NEXT_PUBLIC_API_URL=NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_INSTANCE_NAME=NEXT_PUBLIC_INSTANCE_NAME
+
+RUN pnpm build
+
+# ---- 运行阶段 ----
+FROM ${BASE_IMAGE}
+ARG NODE_VERSION
+
+RUN dnf install -y glibc-langpack-zh ca-certificates findutils procps-ng && \
+    dnf clean all
+ENV LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8
+
+ENV NODE_HOME=/usr/local/node
+RUN curl -fsSL https://mirrors.aliyun.com/nodejs-release/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz \
+        -o /tmp/node.tar.xz && \
+    mkdir -p ${NODE_HOME} && \
+    tar -xJf /tmp/node.tar.xz -C ${NODE_HOME} --strip-components=1 && \
+    rm -f /tmp/node.tar.xz
+ENV PATH=${NODE_HOME}/bin:${PATH}
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
+
+RUN groupadd --system --gid 1001 agentar && \
+    useradd --system --uid 1001 -g agentar agentar
+
+WORKDIR /app
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=agentar:agentar /app/.next/standalone ./
+COPY --from=builder --chown=agentar:agentar /app/.next/static ./.next/static
+COPY --chown=agentar:agentar entrypoint.sh /home/agentar/entrypoint.sh
+RUN chmod +x /home/agentar/entrypoint.sh
+
+USER agentar
+
+EXPOSE 3000
+ENV PORT=3000 \
+    HOSTNAME="0.0.0.0"
+
+ENTRYPOINT ["/home/agentar/entrypoint.sh"]
+CMD ["node", "server.js"]

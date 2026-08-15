@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useTheme } from "next-themes";
 import { Check, Copy } from "lucide-react";
 import { CopyToClipboard } from "react-copy-to-clipboard";
 import { Button } from "@/components/ui/button";
@@ -28,17 +26,11 @@ export default function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { user, isLoading, login } = useAuth();
-  const { resolvedTheme } = useTheme();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [mounted, setMounted] = useState(false);
   const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     if (!isLoading && user) {
@@ -52,7 +44,7 @@ export default function LoginForm() {
     e.preventDefault();
     setError("");
     if (!emailValid) {
-      setError("Enter a valid email address.");
+      setError("请输入有效的邮箱地址。");
       return;
     }
     setSubmitting(true);
@@ -60,7 +52,7 @@ export default function LoginForm() {
       await login(email, password);
       router.push(searchParams.get("next") || "/dashboard/requests");
     } catch (err) {
-      setError(getErrorMessage(err, "Login failed"));
+      setError(getErrorMessage(err, "登录失败"));
     } finally {
       setSubmitting(false);
     }
@@ -71,21 +63,12 @@ export default function LoginForm() {
       <div className="flex-1 bg-surface-default-primary flex items-center justify-center p-8">
         <div className="w-full max-w-md">
           <div className="flex justify-center mb-2">
-            {mounted && (
-              <Image
-                src={
-                  resolvedTheme === "dark"
-                    ? "/images/logos/logo-light.png"
-                    : "/images/logos/logo-dark.png"
-                }
-                alt="Mem0"
-                width={41}
-                height={41}
-              />
-            )}
+            <span className="text-xl font-bold font-fustat text-onSurface-default-primary">
+              Agentar 记忆平台
+            </span>
           </div>
           <h1 className="text-2xl font-semibold text-onSurface-default-primary text-center mb-6 font-fustat">
-            Sign in to Mem0
+            登录 Agentar 记忆平台
           </h1>
           <div className="flex flex-col gap-4 border p-8 border-memBorder-primary rounded-xl">
             {error && (
@@ -95,7 +78,7 @@ export default function LoginForm() {
             )}
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               <div className="space-y-1.5">
-                <Label htmlFor="login-email">Email</Label>
+                <Label htmlFor="login-email">邮箱</Label>
                 <Input
                   id="login-email"
                   type="email"
@@ -107,7 +90,7 @@ export default function LoginForm() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="login-password">Password</Label>
+                <Label htmlFor="login-password">密码</Label>
                 <Input
                   id="login-password"
                   type="password"
@@ -123,7 +106,7 @@ export default function LoginForm() {
                 size="lg"
                 className="w-full"
               >
-                {submitting ? "Signing in..." : "Sign in"}
+                {submitting ? "登录中..." : "登录"}
               </Button>
             </form>
             <Dialog>
@@ -132,16 +115,14 @@ export default function LoginForm() {
                   type="button"
                   className="text-xs text-onSurface-default-tertiary hover:text-onSurface-default-primary underline underline-offset-4 self-center"
                 >
-                  Forgot password?
+                  忘记密码？
                 </button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Reset your admin password</DialogTitle>
+                  <DialogTitle>重置管理员密码</DialogTitle>
                   <DialogDescription>
-                    Run this command on the server host. It overwrites the
-                    existing password; anyone already signed in stays signed in
-                    until their session expires.
+                    请在服务器主机上执行以下命令。该命令将覆盖现有密码；已登录用户在其会话过期前仍保持登录状态。
                   </DialogDescription>
                 </DialogHeader>
                 <div className="flex gap-2">
@@ -174,57 +155,15 @@ export default function LoginForm() {
 
       <div className="relative hidden h-screen flex-1 items-center justify-center overflow-hidden bg-gradient-to-b from-[#31275A] to-[#5C49A3] px-10 lg:flex">
         <div className="pointer-events-none absolute inset-0 bg-[url('/images/dither.svg')] bg-bottom bg-no-repeat bg-contain" />
-        <div className="relative z-10 flex w-full max-w-[564px] flex-col items-center gap-20 text-center text-white">
-          <div className="w-full space-y-5">
-            <p className="typo-h3 text-white">
-              &quot;Mem0 allowed us to unlock true personalized tutoring for
-              every student, and it took us just a weekend to integrate.&quot;
+        <div className="relative z-10 flex w-full max-w-[564px] flex-col items-center gap-8 text-center text-white">
+          <p className="typo-h3 text-white">Agentar 记忆平台</p>
+          <div className="space-y-2">
+            <p className="typo-body text-white">
+              为 AI 智能体提供持久化、个性化的记忆层，
             </p>
-            <div className="flex flex-col items-center gap-[7px]">
-              <div className="flex flex-col items-center gap-1">
-                <p className="typo-body-sm text-white">Michael Tong</p>
-                <p className="typo-body-xs text-white">CTO, RevisionDojo</p>
-              </div>
-              <Image
-                src="/images/micheal.png"
-                alt="Michael Tong"
-                width={32}
-                height={32}
-                className="size-8 rounded-full object-cover"
-              />
-            </div>
-          </div>
-          <div className="flex w-full flex-col items-center gap-3">
-            <p className="typo-body text-white">Trusted by 100k+ Developers</p>
-            <div className="flex items-center justify-center gap-8 text-white">
-              <div className="h-6 shrink-0">
-                <Image
-                  src="/images/logos/aws.svg"
-                  alt="AWS"
-                  width={41}
-                  height={24}
-                  className="size-full object-contain"
-                />
-              </div>
-              <div className="h-5 shrink-0">
-                <Image
-                  src="/images/logos/nvidia.svg"
-                  alt="NVIDIA"
-                  width={109}
-                  height={21}
-                  className="size-full object-contain"
-                />
-              </div>
-              <div className="h-[21px] shrink-0">
-                <Image
-                  src="/images/vercel.png"
-                  alt="Vercel"
-                  width={66}
-                  height={21}
-                  className="size-full object-contain"
-                />
-              </div>
-            </div>
+            <p className="typo-body text-white">
+              支持多租户隔离与全私有化部署。
+            </p>
           </div>
         </div>
       </div>

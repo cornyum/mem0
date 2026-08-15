@@ -8,9 +8,9 @@ function AnalyticsMockup() {
     <div className="space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {[
-          { label: "Total Operations", value: "12,847" },
-          { label: "Avg Latency", value: "142ms" },
-          { label: "Success Rate", value: "99.7%" },
+          { label: "总操作数", value: "12,847" },
+          { label: "平均延迟", value: "142ms" },
+          { label: "成功率", value: "99.7%" },
         ].map((stat) => (
           <Card key={stat.label} className="border-memBorder-primary">
             <CardContent className="p-4">
@@ -24,7 +24,7 @@ function AnalyticsMockup() {
       </div>
       <Card className="border-memBorder-primary">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Operations over time</CardTitle>
+          <CardTitle className="text-sm">操作趋势</CardTitle>
         </CardHeader>
         <CardContent className="p-4">
           <div className="h-[200px] flex items-end gap-1">
@@ -45,8 +45,8 @@ function AnalyticsMockup() {
 export default function AnalyticsPage() {
   return (
     <LockedPage
-      title="Analytics"
-      description="Track memory operations, latency, and usage patterns over time."
+      title="分析"
+      description="跟踪记忆操作、延迟和用量模式随时间的变化。"
       previewContent={<AnalyticsMockup />}
       utmMedium="dashboard-locked-analytics"
     />

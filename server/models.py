@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from db import Base
+from db import TABLE_PREFIX, Base
 
 
 def _utcnow() -> datetime:
@@ -16,7 +16,7 @@ def _new_uuid() -> uuid.UUID:
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = f"{TABLE_PREFIX}users"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
     name: Mapped[str] = mapped_column(String(255))
@@ -28,20 +28,20 @@ class User(Base):
 
 
 class APIKey(Base):
-    __tablename__ = "api_keys"
+    __tablename__ = f"{TABLE_PREFIX}api_keys"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
     key_prefix: Mapped[str] = mapped_column(String(12))
     key_hash: Mapped[str] = mapped_column(Text)
     label: Mapped[str] = mapped_column(String(255))
-    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey(f"{TABLE_PREFIX}users.id", ondelete="CASCADE"))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class RequestLog(Base):
-    __tablename__ = "request_logs"
+    __tablename__ = f"{TABLE_PREFIX}request_logs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
     method: Mapped[str] = mapped_column(String(16))
@@ -53,17 +53,17 @@ class RequestLog(Base):
 
 
 class RefreshTokenJti(Base):
-    __tablename__ = "refresh_token_jtis"
+    __tablename__ = f"{TABLE_PREFIX}refresh_token_jtis"
 
     jti: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey(f"{TABLE_PREFIX}users.id", ondelete="CASCADE"))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class Settings(Base):
-    __tablename__ = "settings"
+    __tablename__ = f"{TABLE_PREFIX}settings"
 
     key: Mapped[str] = mapped_column(String(255), primary_key=True)
     value: Mapped[str] = mapped_column(Text)

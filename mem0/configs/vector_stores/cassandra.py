@@ -13,7 +13,7 @@ class CassandraConfig(BaseModel):
     port: int = Field(9042, description="Cassandra port")
     username: Optional[str] = Field(None, description="Database username")
     password: Optional[str] = Field(None, description="Database password")
-    keyspace: str = Field("mem0", description="Keyspace name")
+    keyspace: str = Field("agentar_mem0", description="Keyspace name")
     collection_name: str = Field("memories", description="Table name")
     embedding_model_dims: int = Field(1536, description="Dimensions of the embedding model")
     secure_connect_bundle: Optional[str] = Field(

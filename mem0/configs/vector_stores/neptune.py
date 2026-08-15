@@ -22,10 +22,10 @@ class NeptuneAnalyticsConfig(BaseModel):
     for storing and retrieving memory embeddings in Mem0.
     
     Attributes:
-        collection_name (str): Name of the collection to store vectors. Defaults to "mem0".
+        collection_name (str): Name of the collection to store vectors. Defaults to "agentar_mem0".
         endpoint (str): Neptune Analytics graph endpoint URL or Graph ID for the runtime.
     """
-    collection_name: str = Field("mem0", description="Default name for the collection")
+    collection_name: str = Field("agentar_mem0", description="Default name for the collection")
     endpoint: str = Field("endpoint", description="Graph ID for the runtime")
 
     @field_validator("collection_name")

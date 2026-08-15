@@ -3,7 +3,8 @@ uvicorn==0.34.0
 pydantic[email]==2.10.4
 mem0ai>=0.1.48
 python-dotenv==1.2.2
-psycopg>=3.2.8
+# psycopg[binary] 自带 libpq wheel，避免容器（如龙蜥基础镜像）缺少系统 libpq
+psycopg[binary]>=3.2.8
 psycopg-pool>=3.2.6,<4.0.0
 
 # Bundled LLM/embedder providers. Extend by adding the provider's package
@@ -19,7 +20,10 @@ bcrypt==4.0.1
 python-jose[cryptography]>=3.3,<4.0
 cryptography>46.0.4
 
-# Anonymous telemetry — on by default, opt out with MEM0_TELEMETRY=false
+# MySQL 8 backend support (APP_DB_BACKEND=mysql); pure-python driver
+PyMySQL>=1.1,<2.0
+
+# Imported by the mem0 core package (telemetry is disabled in this build)
 posthog>=3.0,<8.0
 
 # Per-IP rate limiting on auth endpoints

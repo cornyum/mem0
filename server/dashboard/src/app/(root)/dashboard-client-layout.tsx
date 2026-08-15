@@ -25,7 +25,7 @@ export function DashboardClientLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="zh-CN" suppressHydrationWarning>
       <body
         className={cn(
           Inter.className,

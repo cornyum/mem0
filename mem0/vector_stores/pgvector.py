@@ -513,21 +513,34 @@ class PGVector(VectorStoreBase):
     def list(
         self,
         filters: Optional[dict] = None,
-        top_k: Optional[int] = 100
+        top_k: Optional[int] = 100,
+        after_id: Optional[str] = None,
     ) -> List[OutputData]:
         """
-        List all vectors in a collection.
+        List vectors in a collection.
 
         Args:
             filters (Dict, optional): Filters to apply to the list.
             top_k (int, optional): Number of vectors to return. Defaults to 100.
+            after_id (str, optional): Keyset pagination cursor — return only rows
+                with id strictly greater than this value, ordered by id. Passing
+                the last id of the previous batch yields the next page. Without a
+                cursor the result order is unspecified and rows beyond top_k are
+                unreachable.
 
         Returns:
             List[OutputData]: List of vectors.
         """
         self._ensure_collection()
         filter_conditions, filter_params = _build_filter_conditions(filters)
+        if after_id is not None:
+            filter_conditions = filter_conditions + ["id > %s"]
+            filter_params = filter_params + [after_id]
         filter_clause = sql.SQL("WHERE " + " AND ".join(filter_conditions)) if filter_conditions else sql.SQL("")
+        # Deterministic primary-key order: keyset pagination correctness relies
+        # on it (the cursor is a batch's last id, which must be the batch max),
+        # and unordered LIMIT selects are not stable across calls anyway.
+        order_clause = sql.SQL("ORDER BY id")
 
         with self._get_cursor() as cur:
             cur.execute(
@@ -535,8 +548,9 @@ class PGVector(VectorStoreBase):
                 SELECT id, payload
                 FROM {}
                 {}
+                {}
                 LIMIT %s
-                """).format(self._col(), filter_clause),
+                """).format(self._col(), filter_clause, order_clause),
                 (*filter_params, top_k),
             )
             results = cur.fetchall()

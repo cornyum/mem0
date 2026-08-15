@@ -610,7 +610,7 @@ class TestConfig:
             from mem0.configs.vector_stores.turbopuffer import TurbopufferConfig
 
             config = TurbopufferConfig()
-            assert config.collection_name == "mem0"
+            assert config.collection_name == "agentar_mem0"
             assert config.embedding_model_dims == 1536
             assert config.distance_metric == "cosine_distance"
             assert config.batch_size == 100

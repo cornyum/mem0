@@ -10,17 +10,28 @@ from typing import Sequence, Union
 
 from alembic import op
 
+from db import TABLE_PREFIX
+
 revision: str = "006"
 down_revision: Union[str, None] = "005"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+INDEX_NAME = f"ix_{TABLE_PREFIX}request_logs_created_at"
+TABLE_NAME = f"{TABLE_PREFIX}request_logs"
+
 
 def upgrade() -> None:
-    op.drop_index("ix_request_logs_created_at", table_name="request_logs")
-    op.execute("CREATE INDEX ix_request_logs_created_at ON request_logs USING BRIN (created_at)")
+    # BRIN is a PostgreSQL-only index type; on MySQL 8 the btree index
+    # created in 002 is kept as-is.
+    if op.get_bind().dialect.name != "postgresql":
+        return
+    op.drop_index(INDEX_NAME, table_name=TABLE_NAME)
+    op.execute(f"CREATE INDEX {INDEX_NAME} ON {TABLE_NAME} USING BRIN (created_at)")
 
 
 def downgrade() -> None:
-    op.drop_index("ix_request_logs_created_at", table_name="request_logs")
-    op.create_index("ix_request_logs_created_at", "request_logs", ["created_at"])
+    if op.get_bind().dialect.name != "postgresql":
+        return
+    op.drop_index(INDEX_NAME, table_name=TABLE_NAME)
+    op.create_index(INDEX_NAME, TABLE_NAME, ["created_at"])

@@ -13,7 +13,7 @@ class LangchainConfig(BaseModel):
     VectorStore: ClassVar[type] = VectorStore
 
     client: VectorStore = Field(description="Existing VectorStore instance")
-    collection_name: str = Field("mem0", description="Name of the collection to use")
+    collection_name: str = Field("agentar_mem0", description="Name of the collection to use")
 
     @model_validator(mode="before")
     @classmethod

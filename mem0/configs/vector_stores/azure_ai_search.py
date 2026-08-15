@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AzureAISearchConfig(BaseModel):
-    collection_name: str = Field("mem0", description="Name of the collection")
+    collection_name: str = Field("agentar_mem0", description="Name of the collection")
     service_name: str = Field(None, description="Azure AI Search service name")
     api_key: str = Field(None, description="API key for the Azure AI Search service")
     embedding_model_dims: int = Field(1536, description="Dimension of the embedding vector")

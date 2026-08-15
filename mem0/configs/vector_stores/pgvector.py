@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class PGVectorConfig(BaseModel):
     dbname: str = Field("postgres", description="Default name for the database")
-    collection_name: str = Field("mem0", description="Default name for the collection")
+    collection_name: str = Field("agentar_mem0", description="Default name for the collection")
     embedding_model_dims: Optional[int] = Field(1536, description="Dimensions of the embedding model")
     user: Optional[str] = Field(None, description="Database user")
     password: Optional[str] = Field(None, description="Database password")

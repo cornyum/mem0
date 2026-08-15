@@ -51,7 +51,7 @@ class OracleAIVectorSearchConfig(BaseModel):
         None, description="Oracle Connection or ConnectionPool (overrides connection string and individual parameters)"
     )
 
-    collection_name: str = Field("mem0", description="Default name for the collection")
+    collection_name: str = Field("agentar_mem0", description="Default name for the collection")
     embedding_model_dims: int = Field(1536, description="Dimension of the embedding vectors")
     distance_metric: Literal["EUCLIDEAN", "EUCLIDEAN_SQUARED", "COSINE", "DOT", "HAMMING", "MANHATTAN"] = Field(
         "COSINE",

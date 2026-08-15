@@ -1,0 +1,80 @@
+# Agentar 记忆平台 · 服务端镜像
+# 基础镜像：阿里龙蜥 Anolis OS 8（x86_64）。
+# 构建（在仓库根目录执行）：
+#   docker build --platform linux/amd64 -f server/Dockerfile.agentar -t agentar-mem-server:latest .
+# 可用构建参数：
+#   --build-arg BASE_IMAGE=<私有仓库地址>/anolisos:8.8   （内网镜像仓库）
+#   --build-arg PYTHON_VERSION=3.11
+ARG BASE_IMAGE=openanolis/anolisos:8.8
+FROM ${BASE_IMAGE}
+
+# 中文 locale 与基础工具
+RUN dnf install -y glibc-langpack-zh ca-certificates curl tar bzip2 gzip procps-ng findutils && \
+    dnf clean all
+ENV LANG=zh_CN.UTF-8 \
+    LC_ALL=zh_CN.UTF-8
+
+# ---- Miniconda（国内镜像源），统一用 conda 环境 agentar_mem0 管理 Python 依赖 ----
+# 安装包与 conda channel 走清华 TUNA 镜像（阿里云镜像未收录 miniconda 安装包）；
+# pip 仍默认阿里云 PyPI 源（见下方 PIP_INDEX_URL）
+ENV CONDA_DIR=/opt/miniconda3
+RUN for i in 1 2 3 4 5; do \
+        curl -fsSL -C - https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+            -o /tmp/miniconda.sh && break; \
+        echo "miniconda 下载中断，第 ${i} 次重试..."; sleep 3; \
+    done && \
+    bash /tmp/miniconda.sh -b -p ${CONDA_DIR} && \
+    rm -f /tmp/miniconda.sh && \
+    ${CONDA_DIR}/bin/conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main/ && \
+    ${CONDA_DIR}/bin/conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free/ && \
+    ${CONDA_DIR}/bin/conda config --set show_channel_urls yes
+ENV PATH=${CONDA_DIR}/bin:${PATH}
+
+ARG PYTHON_VERSION=3.11
+# 新版 conda 要求显式接受默认仓库的服务条款后才能创建环境；
+# 镜像源偶发断流，创建环境时清理残留并重试
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    for i in 1 2 3 4 5; do \
+        conda env remove -n agentar_mem0 -y >/dev/null 2>&1 || true; \
+        conda create -y -n agentar_mem0 python=${PYTHON_VERSION} && break; \
+        echo "conda create 失败，第 ${i} 次重试..."; sleep 3; \
+    done && \
+    conda clean -y --all
+# 让 shell 里直接使用该环境的 python/pip/uvicorn/alembic
+ENV CONDA_DEFAULT_ENV=agentar_mem0 \
+    PATH=${CONDA_DIR}/envs/agentar_mem0/bin:${PATH}
+
+# pip 走阿里云 PyPI 源
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# 先装服务端依赖（利用构建缓存）
+COPY server/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# 安装本仓库的 mem0 SDK（本地代码，不访问公网服务）
+COPY pyproject.toml README.md /app/packages/
+COPY mem0 /app/packages/mem0
+RUN pip install --no-cache-dir /app/packages && \
+    rm -rf /app/packages
+
+# 服务端代码：项目位于 /app/server，日志写到项目同级目录 /logs
+COPY server /app/server
+WORKDIR /app/server
+
+# /logs：项目同级日志目录；/app/history：记忆历史 SQLite（可在 compose 中挂载卷持久化）
+RUN mkdir -p /logs /app/history && \
+    chmod +x /app/server/docker-entrypoint.sh
+
+ENV LOG_DIR=/logs \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MEM0_TELEMETRY=false
+
+EXPOSE 8000
+
+ENTRYPOINT ["/bin/bash", "/app/server/docker-entrypoint.sh"]

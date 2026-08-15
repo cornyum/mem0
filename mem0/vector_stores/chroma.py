@@ -51,7 +51,7 @@ class ChromaDB(VectorStoreBase):
             self.client = chromadb.CloudClient(
                 api_key=api_key,
                 tenant=tenant,
-                database="mem0"  # Use fixed database name for cloud
+                database="agentar_mem0"  # Use fixed database name for cloud
             )
         else:
             # Initialize local or server client

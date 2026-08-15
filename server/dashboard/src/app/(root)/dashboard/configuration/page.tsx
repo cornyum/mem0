@@ -13,7 +13,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "@/components/ui/use-toast";
-import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
 import { MEMORY_ENDPOINTS } from "@/utils/api-endpoints";
@@ -43,7 +42,7 @@ export default function ConfigurationPage() {
       const res = await api.get(MEMORY_ENDPOINTS.CONFIGURE);
       return getEffectiveConfig(res.data);
     },
-    { errorToast: "Failed to load server configuration" },
+    { errorToast: "加载服务器配置失败" },
   );
 
   const { data: providers } = useApiQuery<BundledProviders>(
@@ -53,7 +52,7 @@ export default function ConfigurationPage() {
       );
       return res.data;
     },
-    { errorToast: "Failed to load bundled providers" },
+    { errorToast: "加载内置供应商失败" },
   );
 
   useEffect(() => {
@@ -95,10 +94,10 @@ export default function ConfigurationPage() {
       }
 
       await api.post(MEMORY_ENDPOINTS.CONFIGURE, newConfig);
-      toast({ title: "Configuration saved", variant: "success" });
+      toast({ title: "配置已保存", variant: "success" });
     } catch (error) {
       toast({
-        title: "Failed to save configuration",
+        title: "保存配置失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -110,22 +109,22 @@ export default function ConfigurationPage() {
   return (
     <div className="space-y-6">
       <div className="space-y-1">
-        <h1 className="text-xl font-semibold font-fustat">Configuration</h1>
+        <h1 className="text-xl font-semibold font-fustat">配置</h1>
         {isPrefilling && (
           <p className="text-sm text-onSurface-default-tertiary">
-            Loading effective server configuration...
+            正在加载服务器生效配置...
           </p>
         )}
       </div>
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">LLM Provider</CardTitle>
+          <CardTitle className="text-sm">LLM 供应商</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label className="text-xs">Provider</Label>
+              <Label className="text-xs">供应商</Label>
               <Select
                 value={llmProvider}
                 onValueChange={(value) => {
@@ -135,7 +134,7 @@ export default function ConfigurationPage() {
                 disabled={!isAdmin || !providers}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select provider" />
+                  <SelectValue placeholder="选择供应商" />
                 </SelectTrigger>
                 <SelectContent>
                   {providers?.llm.map((name) => (
@@ -147,7 +146,7 @@ export default function ConfigurationPage() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Model</Label>
+              <Label className="text-xs">模型</Label>
               <Input
                 placeholder="gpt-4.1-nano-2025-04-14"
                 value={llmModel}
@@ -157,7 +156,7 @@ export default function ConfigurationPage() {
             </div>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">API Key</Label>
+            <Label className="text-xs">API 密钥</Label>
             <Input
               type="password"
               placeholder="sk-..."
@@ -171,19 +170,19 @@ export default function ConfigurationPage() {
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">Embedding Model</CardTitle>
+          <CardTitle className="text-sm">嵌入模型</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label className="text-xs">Provider</Label>
+              <Label className="text-xs">供应商</Label>
               <Select
                 value={embedderProvider}
                 onValueChange={setEmbedderProvider}
                 disabled={!isAdmin || !providers}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select provider" />
+                  <SelectValue placeholder="选择供应商" />
                 </SelectTrigger>
                 <SelectContent>
                   {providers?.embedder.map((name) => (
@@ -195,7 +194,7 @@ export default function ConfigurationPage() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Model</Label>
+              <Label className="text-xs">模型</Label>
               <Input
                 placeholder="text-embedding-3-small"
                 value={embedderModel}
@@ -208,32 +207,15 @@ export default function ConfigurationPage() {
       </Card>
 
       <p className="text-xs text-onSurface-default-tertiary">
-        Need another provider? Install its Python package, rebuild the image,
-        and extend the bundled list. See the{" "}
-        <a
-          href="https://docs.mem0.ai/open-source/setup#supported-providers"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="underline underline-offset-4 hover:text-onSurface-default-primary"
-        >
-          setup guide
-        </a>
-        .
+        需要其他供应商？请安装对应的 Python
+        包，重新构建镜像，并扩展内置供应商列表。
       </p>
 
       {isAdmin && (
         <Button onClick={handleSave} disabled={isSaving}>
-          {isSaving ? "Saving..." : "Save Configuration"}
+          {isSaving ? "保存中..." : "保存配置"}
         </Button>
       )}
-
-      <UpgradeBanner
-        id="config-sso"
-        message="Looking for SSO / SAML? Available in Enterprise."
-        ctaLabel="Contact sales"
-        ctaUrl="https://app.mem0.ai/enterprise?utm_source=oss&utm_medium=dashboard-configuration-sso"
-        variant="enterprise"
-      />
     </div>
   );
 }

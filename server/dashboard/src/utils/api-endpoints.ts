@@ -32,3 +32,11 @@ export const ENTITY_ENDPOINTS = {
   BY_ID: (type: string, id: string) =>
     `/entities/${type}/${encodeURIComponent(id)}`,
 } as const;
+
+export const CATEGORY_ENDPOINTS = {
+  BASE: "/categories",
+} as const;
+
+export const EXPORT_ENDPOINTS = {
+  BASE: "/export",
+} as const;

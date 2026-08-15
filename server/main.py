@@ -19,12 +19,15 @@ from errors import (
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from logging.handlers import TimedRotatingFileHandler
 from models import RequestLog, User
 from pydantic import BaseModel, Field
 from rate_limit import limiter
 from routers import api_keys as api_keys_router
 from routers import auth as auth_router
+from routers import categories as categories_router
 from routers import entities as entities_router
+from routers import export as export_router
 from routers import requests as requests_router
 from schemas import MessageResponse
 from server_state import (
@@ -43,7 +46,48 @@ from mem0.exceptions import ValidationError as Mem0ValidationError
 load_dotenv()
 
 install_request_id_logging()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(request_id)s] %(message)s")
+
+
+def _setup_logging() -> None:
+    """Console logging plus a date-rotated file under LOG_DIR.
+
+    LOG_DIR defaults to the `logs` directory next to the project directory
+    (sibling of the project root), so logs stay out of the code tree in both
+    source and containerized deployments. Rotation: one file per day,
+    LOG_BACKUP_COUNT days kept (default 14).
+    """
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_format = "%(asctime)s - %(levelname)s - [%(request_id)s] %(message)s"
+    formatter = logging.Formatter(log_format)
+
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.handlers.clear()
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    default_log_dir = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "logs")
+    )
+    log_dir = os.environ.get("LOG_DIR") or default_log_dir
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = TimedRotatingFileHandler(
+            os.path.join(log_dir, "agentar-mem-server.log"),
+            when="midnight",
+            interval=1,
+            backupCount=int(os.environ.get("LOG_BACKUP_COUNT", "14")),
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    except OSError:
+        logging.warning("LOG_DIR %s is not writable; file logging disabled", log_dir)
+
+
+_setup_logging()
 
 MIN_KEY_LENGTH = 16
 SENSITIVE_CONFIG_KEYS = {
@@ -80,7 +124,6 @@ def _warn_if_unconfigured() -> None:
         "    1. Set ADMIN_API_KEY=<long-random-value>  (fastest, no client changes)\n"
         "    2. Register an admin at http://<host>:3000/setup\n"
         "    3. Set AUTH_DISABLED=true                 (local development only)\n"
-        "  Docs: https://docs.mem0.ai/open-source/features/rest-api#authentication\n"
         "%s",
         "=" * 72,
         "=" * 72,
@@ -110,12 +153,41 @@ POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
 POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
-POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
+POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "agentar_mem0")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY")
+DASHSCOPE_BASE_URL = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-5-mini")
 DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
+
+if DASHSCOPE_API_KEY:
+    # Bailian (DashScope): Qwen LLM/embedder via the OpenAI-compatible endpoint,
+    # GTE reranker via the native DashScope text-rerank API.
+    DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "qwen-plus-latest")
+    DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "qwen3.7-text-embedding")
+    DEFAULT_RERANKER_MODEL = os.environ.get("MEM0_DEFAULT_RERANKER_MODEL", "gte-rerank-v2")
+    DEFAULT_EMBEDDING_DIMS = int(os.environ.get("MEM0_EMBEDDING_DIMS", "1024"))
+    _llm_config = {
+        "provider": "openai",
+        "config": {
+            "api_key": DASHSCOPE_API_KEY,
+            "openai_base_url": DASHSCOPE_BASE_URL,
+            "temperature": 0.2,
+            "model": DEFAULT_LLM_MODEL,
+        },
+    }
+    _embedder_config = {
+        "provider": "openai",
+        "config": {"api_key": DASHSCOPE_API_KEY, "openai_base_url": DASHSCOPE_BASE_URL, "model": DEFAULT_EMBEDDER_MODEL},
+    }
+    _reranker_config = {"provider": "dashscope", "config": {"api_key": DASHSCOPE_API_KEY, "model": DEFAULT_RERANKER_MODEL}}
+else:
+    DEFAULT_EMBEDDING_DIMS = int(os.environ.get("MEM0_EMBEDDING_DIMS", "1536"))
+    _llm_config = {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL}}
+    _embedder_config = {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}}
+    _reranker_config = None
 
 DEFAULT_CONFIG = {
     "version": "v1.1",
@@ -128,15 +200,15 @@ DEFAULT_CONFIG = {
             "user": POSTGRES_USER,
             "password": POSTGRES_PASSWORD,
             "collection_name": POSTGRES_COLLECTION_NAME,
+            "embedding_model_dims": DEFAULT_EMBEDDING_DIMS,
         },
     },
-    "llm": {
-        "provider": "openai",
-        "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL},
-    },
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
+    "llm": _llm_config,
+    "embedder": _embedder_config,
     "history_db_path": HISTORY_DB_PATH,
 }
+if _reranker_config:
+    DEFAULT_CONFIG["reranker"] = _reranker_config
 
 
 set_session_factory(SessionLocal)
@@ -144,7 +216,7 @@ initialize_state(DEFAULT_CONFIG)
 
 
 app = FastAPI(
-    title="Mem0 REST APIs",
+    title="Agentar Memory REST APIs",
     description=(
         "A REST API for managing and searching memories for your AI Agents and Apps.\n\n"
         "## Authentication\n"
@@ -170,6 +242,8 @@ app.include_router(auth_router.router)
 app.include_router(api_keys_router.router)
 app.include_router(entities_router.router)
 app.include_router(requests_router.router)
+app.include_router(categories_router.router)
+app.include_router(export_router.router)
 
 
 class Message(BaseModel):
@@ -182,6 +256,8 @@ class MemoryCreate(BaseModel):
     user_id: Optional[str] = None
     agent_id: Optional[str] = None
     run_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    session_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     expiration_date: Optional[str] = Field(None, description="Expiration date in YYYY-MM-DD format.")
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
@@ -200,11 +276,14 @@ class SearchRequest(BaseModel):
     user_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
     run_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
     agent_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
+    tenant_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
+    session_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
     filters: Optional[Dict[str, Any]] = None
     top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
     explain: Optional[bool] = Field(None, description="Include score details for each search result.")
     show_expired: Optional[bool] = Field(None, description="Include expired memories.")
+    rerank: Optional[bool] = Field(None, description="Rerank results with the configured reranker.")
 
 
 class GenerateInstructionsRequest(BaseModel):
@@ -367,8 +446,19 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 @app.post("/memories", summary="Create memories")
 def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     """Store new memories."""
-    if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
+    if not any(
+        [
+            memory_create.user_id,
+            memory_create.agent_id,
+            memory_create.run_id,
+            memory_create.tenant_id,
+            memory_create.session_id,
+        ]
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="At least one identifier (user_id, agent_id, run_id, tenant_id, session_id) is required.",
+        )
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     try:
@@ -383,29 +473,32 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at", "expiration_date"}
+
+# Single source of truth shared with /export so listings never drift.
+from serialize import serialize_memory as _serialize_memory  # noqa: E402
 
 
-def _serialize_memory(row: Any) -> Dict[str, Any]:
-    payload = getattr(row, "payload", None) or {}
-    return {
-        "id": getattr(row, "id", None),
-        "memory": payload.get("data"),
-        "user_id": payload.get("user_id"),
-        "agent_id": payload.get("agent_id"),
-        "run_id": payload.get("run_id"),
-        "hash": payload.get("hash"),
-        "expiration_date": payload.get("expiration_date"),
-        "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
-        "created_at": payload.get("created_at"),
-        "updated_at": payload.get("updated_at"),
-    }
-
-
-def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:
+def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT, category: Optional[str] = None) -> Dict[str, Any]:
     results = get_memory_instance().vector_store.list(top_k=limit)
     rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
-    return {"results": [_serialize_memory(row) for row in rows]}
+    serialized = [_serialize_memory(row) for row in rows]
+    if category:
+        serialized = [row for row in serialized if category in _memory_categories(row)]
+    return {"results": serialized}
+
+
+def _memory_categories(row: Any) -> List[Any]:
+    """Extract the categories list from a memory row.
+
+    Serialized rows carry categories under metadata (non-reserved payload keys),
+    while get_all() results may also expose them top-level; support both.
+    """
+    if not isinstance(row, dict):
+        return []
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("categories") is not None:
+        return metadata.get("categories") or []
+    return row.get("categories") or []
 
 
 @app.get("/memories", summary="Get memories")
@@ -414,26 +507,46 @@ def get_all_memories(
     user_id: Optional[str] = None,
     run_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    category: Optional[str] = Query(None, description="Filter by custom category label."),
     top_k: Optional[int] = Query(None, ge=0, le=ALL_MEMORIES_LIMIT),
     show_expired: bool = Query(False),
     _auth=Depends(verify_auth),
 ):
     """Retrieve stored memories. Lists all memories when no identifier is provided (admin only)."""
     try:
-        if not any([user_id, run_id, agent_id]):
+        if not any([user_id, run_id, agent_id, tenant_id, session_id]):
             auth_type = getattr(request.state, "auth_type", "none")
             if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
                 raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
             # Admin all-memory listing is intentionally raw; scoped get_all below applies expiry visibility.
-            return _list_all_memories(limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT)
+            # category alone does not count as an identifier but can filter the admin listing.
+            return _list_all_memories(limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT, category=category)
         filters = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "tenant_id": tenant_id,
+                "session_id": session_id,
+            }.items()
+            if v
         }
         params = {"filters": filters}
         if top_k is not None:
             params["top_k"] = top_k
         params["show_expired"] = show_expired
-        return get_memory_instance().get_all(**params)
+        response = get_memory_instance().get_all(**params)
+        if category:
+            results = response.get("results", []) if isinstance(response, dict) else response or []
+            filtered = [row for row in results if category in _memory_categories(row)]
+            if isinstance(response, dict):
+                response["results"] = filtered
+            else:
+                response = filtered
+        return response
     except HTTPException:
         raise
     except Exception:
@@ -455,7 +568,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
     try:
         filters = search_req.filters or {}
         deprecated_keys = []
-        for entity_key in ("user_id", "agent_id", "run_id"):
+        for entity_key in ("user_id", "agent_id", "run_id", "tenant_id", "session_id"):
             entity_val = getattr(search_req, entity_key, None)
             if entity_val:
                 filters[entity_key] = entity_val
@@ -475,6 +588,8 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["explain"] = search_req.explain
         if search_req.show_expired is not None:
             params["show_expired"] = search_req.show_expired
+        if search_req.rerank is not None:
+            params["rerank"] = search_req.rerank
         return get_memory_instance().search(query=search_req.query, filters=filters, **params)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -529,14 +644,24 @@ def delete_all_memories(
     user_id: Optional[str] = None,
     run_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    session_id: Optional[str] = None,
     _auth=Depends(require_admin),
 ):
     """Delete all memories for a given identifier. Requires admin role."""
-    if not any([user_id, run_id, agent_id]):
+    if not any([user_id, run_id, agent_id, tenant_id, session_id]):
         raise HTTPException(status_code=400, detail="At least one identifier is required.")
     try:
         params = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "tenant_id": tenant_id,
+                "session_id": session_id,
+            }.items()
+            if v
         }
         get_memory_instance().delete_all(**params)
         return MessageResponse(message="All relevant memories deleted")

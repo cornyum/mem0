@@ -1,0 +1,25 @@
+# 服务端镜像（server/Dockerfile.agentar）构建上下文排除项
+.git
+.github
+.omc
+.claude
+.env
+**/.env
+**/.env.local
+server/history
+server/.env
+server/dashboard/node_modules
+server/dashboard/.next
+**/__pycache__
+**/*.pyc
+evaluation
+docs
+examples
+mem0-ts
+integrations
+pr-reviews
+skills
+cli
+tests
+*.md
+!README.md

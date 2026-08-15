@@ -15,9 +15,6 @@ interface UpgradeBannerProps {
 
 export function UpgradeBanner({
   id,
-  message,
-  ctaLabel,
-  ctaUrl,
   variant,
   dismissible = true,
 }: UpgradeBannerProps) {
@@ -45,18 +42,9 @@ export function UpgradeBanner({
           : "bg-memRed-100 border-l-2 border-memRed-400",
       )}
     >
-      <p className="flex-1 text-onSurface-default-secondary">{message}</p>
-      <a
-        href={ctaUrl}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={cn(
-          "text-xs font-medium whitespace-nowrap underline",
-          variant === "cloud" ? "text-memGold-700" : "text-memRed-600",
-        )}
-      >
-        {ctaLabel}
-      </a>
+      <p className="flex-1 text-onSurface-default-secondary">
+        该能力当前版本暂未开放，敬请期待。
+      </p>
       {dismissible && (
         <button
           onClick={handleDismiss}

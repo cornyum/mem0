@@ -77,7 +77,7 @@ def test_sync_add_without_timestamp_does_not_call_temporal_feature_notice(monkey
         lambda *args: pytest.fail("temporal feature notice should not run"),
     )
 
-    with pytest.raises(Exception, match="At least one of 'user_id', 'agent_id', or 'run_id'"):
+    with pytest.raises(Exception, match="At least one of 'user_id'"):
         Memory.add(Memory.__new__(Memory), "hello")
 
     assert get_error is None

@@ -19,7 +19,6 @@ import DeleteConfirmationModal from "@/components/ui/delete-confirmation-modal";
 import { api } from "@/utils/api";
 import { API_KEY_ENDPOINTS } from "@/utils/api-endpoints";
 import { toast } from "@/components/ui/use-toast";
-import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { Plus, Copy, Check, Trash2 } from "lucide-react";
 import { CopyToClipboard } from "react-copy-to-clipboard";
 import { format } from "date-fns";
@@ -43,7 +42,7 @@ export default function ApiKeysPage() {
       const res = await api.get<ApiKey[]>(API_KEY_ENDPOINTS.BASE);
       return res.data ?? [];
     },
-    { errorToast: "Failed to load API keys", initialData: [] },
+    { errorToast: "加载 API 密钥失败", initialData: [] },
   );
 
   const handleCreate = async () => {
@@ -55,7 +54,7 @@ export default function ApiKeysPage() {
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to create key",
+        title: "创建密钥失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -66,12 +65,12 @@ export default function ApiKeysPage() {
     if (!keyToRevoke) return;
     try {
       await api.delete(API_KEY_ENDPOINTS.BY_ID(keyToRevoke.id));
-      toast({ title: "API key revoked", variant: "success" });
+      toast({ title: "API 密钥已吊销", variant: "success" });
       setKeyToRevoke(null);
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to revoke key",
+        title: "吊销密钥失败",
         description: getErrorMessage(error),
         variant: "destructive",
       });
@@ -88,10 +87,10 @@ export default function ApiKeysPage() {
   };
 
   const columns = [
-    { key: "label" as keyof ApiKey, label: "Label", width: 150 },
+    { key: "label" as keyof ApiKey, label: "标签", width: 150 },
     {
       key: "key_prefix" as keyof ApiKey,
-      label: "Key",
+      label: "密钥",
       width: 120,
       render: (value: string) => (
         <code className="text-xs font-mono">{value}...</code>
@@ -99,16 +98,16 @@ export default function ApiKeysPage() {
     },
     {
       key: "created_at" as keyof ApiKey,
-      label: "Created",
+      label: "创建时间",
       width: 120,
-      render: (value: string) => format(new Date(value), "MMM d, yyyy"),
+      render: (value: string) => format(new Date(value), "yyyy-MM-dd"),
     },
     {
       key: "last_used_at" as keyof ApiKey,
-      label: "Last Used",
+      label: "最近使用",
       width: 120,
       render: (value: string | null) =>
-        value ? format(new Date(value), "MMM d, yyyy") : "Never",
+        value ? format(new Date(value), "yyyy-MM-dd") : "从未使用",
     },
     {
       key: "id" as keyof ApiKey,
@@ -130,26 +129,26 @@ export default function ApiKeysPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold font-fustat">API Keys</h1>
+        <h1 className="text-xl font-semibold font-fustat">API 密钥</h1>
         <Dialog open={createOpen} onOpenChange={handleDialogClose}>
           <DialogTrigger asChild>
             <Button size="sm">
-              <Plus className="size-4 mr-1" /> Create Key
+              <Plus className="size-4 mr-1" /> 创建密钥
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create API Key</DialogTitle>
+              <DialogTitle>创建 API 密钥</DialogTitle>
             </DialogHeader>
             {!newKey ? (
               <div className="space-y-4 mt-2">
                 <div className="space-y-2">
-                  <Label htmlFor="api-key-label">Label</Label>
+                  <Label htmlFor="api-key-label">标签</Label>
                   <Input
                     id="api-key-label"
                     value={newLabel}
                     onChange={(e) => setNewLabel(e.target.value)}
-                    placeholder="e.g. Production"
+                    placeholder="例如：生产环境"
                   />
                 </div>
                 <Button
@@ -157,13 +156,13 @@ export default function ApiKeysPage() {
                   disabled={!newLabel}
                   className="w-full"
                 >
-                  Create
+                  创建
                 </Button>
               </div>
             ) : (
               <div className="space-y-4 mt-2">
                 <div className="space-y-2">
-                  <Label htmlFor="api-key-new">Your API Key</Label>
+                  <Label htmlFor="api-key-new">您的 API 密钥</Label>
                   <div className="flex gap-2">
                     <Input
                       id="api-key-new"
@@ -188,14 +187,14 @@ export default function ApiKeysPage() {
                     </CopyToClipboard>
                   </div>
                   <p className="text-xs text-onSurface-danger-primary">
-                    Save this key -- you won&apos;t see it again.
+                    请保存此密钥，关闭后将无法再次查看。
                   </p>
                 </div>
                 <Button
                   onClick={() => handleDialogClose(false)}
                   className="w-full"
                 >
-                  Done
+                  完成
                 </Button>
               </div>
             )}
@@ -203,22 +202,12 @@ export default function ApiKeysPage() {
         </Dialog>
       </div>
 
-      {keys.length >= 3 && (
-        <UpgradeBanner
-          id="api-keys-3"
-          message="Managing multiple apps? Cloud offers project-based isolation."
-          ctaLabel="Explore Cloud"
-          ctaUrl="https://app.mem0.ai?utm_source=oss&utm_medium=dashboard-api-keys"
-          variant="cloud"
-        />
-      )}
-
       {isLoading ? (
         <TableSkeleton rows={3} columns={4} />
       ) : keys.length === 0 ? (
         <EmptyState
-          title="No API keys yet"
-          description="Create your first API key to start using the Mem0 API."
+          title="暂无 API 密钥"
+          description="创建您的第一个 API 密钥，开始使用 Agentar 记忆平台 API。"
         />
       ) : (
         <Card className="border-memBorder-primary overflow-hidden">
@@ -234,10 +223,10 @@ export default function ApiKeysPage() {
         isOpen={!!keyToRevoke}
         onClose={() => setKeyToRevoke(null)}
         onConfirm={handleRevoke}
-        title="Revoke API key"
-        description="Applications using this key will immediately stop working. This cannot be undone."
+        title="吊销 API 密钥"
+        description="使用该密钥的应用将立即失效，此操作无法撤销。"
         itemName={keyToRevoke?.label ?? ""}
-        confirmButtonText="Revoke"
+        confirmButtonText="吊销"
       />
     </div>
   );

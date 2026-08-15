@@ -11,16 +11,24 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
+from db import TABLE_PREFIX
+
 revision: str = "004"
 down_revision: Union[str, None] = "003"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+INDEX_NAME = f"ix_{TABLE_PREFIX}users_only_one_admin"
+
 
 def upgrade() -> None:
+    # MySQL 8 has no partial indexes; there the at-most-one-admin rule is
+    # enforced by the application layer instead.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.create_index(
-        "ix_users_only_one_admin",
-        "users",
+        INDEX_NAME,
+        f"{TABLE_PREFIX}users",
         ["role"],
         unique=True,
         postgresql_where=sa.text("role = 'admin'"),
@@ -28,4 +36,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_users_only_one_admin", table_name="users")
+    if op.get_bind().dialect.name != "postgresql":
+        return
+    op.drop_index(INDEX_NAME, table_name=f"{TABLE_PREFIX}users")
