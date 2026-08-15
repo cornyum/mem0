@@ -191,3 +191,6 @@ qdrant_storage/
 testing.ipynb
 .weave/
 
+
+# OMC 运营产物（会话状态/计划/交接文档，不随代码提交）
+.omc/

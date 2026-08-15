@@ -174,7 +174,9 @@ console.log(results.results[0].score_details);
 ```
 </CodeGroup>
 
-Each result includes `score_details` with the semantic score, normalized BM25 score, entity boost, raw combined score, maximum possible score, final score, and threshold used for filtering. The field is omitted unless `explain` is enabled, so existing response shapes stay unchanged.
+Each result includes `score_details` with the semantic score, normalized BM25 score, entity boost, recency score (time-decayed freshness, see below), raw combined score, maximum possible score, final score, and threshold used for filtering. The field is omitted unless `explain` is enabled, so existing response shapes stay unchanged.
+
+The combined score includes a recency term: `updated_at` (falling back to `created_at`) is decayed with a 30-day half-life and contributes a fixed weight of 0.25. This keeps fresher facts ranked above stale contradictory ones written by the ADD-only extraction pipeline; memories with no parsable timestamp are anchored at the neutral midpoint (equivalent to a 30-day-old memory). Relevance still dominates — a clearly more relevant older memory outranks a weak fresh match.
 
 ## Filter patterns
 
