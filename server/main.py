@@ -347,24 +347,7 @@ def _should_log_request(request: Request) -> bool:
     return not path.startswith(SKIPPED_REQUEST_LOG_PREFIXES)
 
 
-# Request logging is best-effort: when the app DB is unreachable (e.g. running
-# the test suite without a database) every request would otherwise pay the
-# connect-timeout and dump a full ERROR traceback, drowning real signal.
-# Circuit-break for a short window after a failure and rate-limit tracebacks.
-# Unlocked on purpose: a benign race here at worst logs one extra line.
-_REQUEST_LOG_CIRCUIT_SECONDS = 60.0
-_REQUEST_LOG_TRACEBACK_INTERVAL = 600.0
-_request_log_circuit_until = 0.0
-_request_log_last_traceback = 0.0
-
-
 def _persist_request_log(method: str, path: str, status_code: int, latency_ms: float, auth_type: str) -> None:
-    global _request_log_circuit_until, _request_log_last_traceback
-
-    now = time.monotonic()
-    if now < _request_log_circuit_until:
-        return
-
     session = SessionLocal()
 
     try:
@@ -378,17 +361,9 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
             )
         )
         session.commit()
-    except Exception as e:
+    except Exception:
         session.rollback()
-        _request_log_circuit_until = now + _REQUEST_LOG_CIRCUIT_SECONDS
-        if now - _request_log_last_traceback >= _REQUEST_LOG_TRACEBACK_INTERVAL:
-            _request_log_last_traceback = now
-            logging.exception(
-                "Failed to persist request log (app DB unreachable; retry suppressed for %.0fs)",
-                _REQUEST_LOG_CIRCUIT_SECONDS,
-            )
-        else:
-            logging.warning("Failed to persist request log: %s", e)
+        logging.exception("Failed to persist request log")
     finally:
         session.close()
 
