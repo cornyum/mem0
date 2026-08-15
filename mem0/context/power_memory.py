@@ -39,7 +39,8 @@ from mem0.context.models import (
     MemoryCitation,
     RememberResult,
 )
-from mem0.context.scope import ScopeIdentity
+from mem0.context.observability import Observability, application_op, shared_observability
+from mem0.context.scope import SCOPE_FIELDS, ScopeIdentity
 from mem0.context.store import ACTIVE, ContextStore, EntryVersionView, RememberOutcome
 
 logger = logging.getLogger(__name__)
@@ -56,20 +57,30 @@ class PowerMemory(Memory):
     :class:`ContextStore` bound to the deployment's app DB engine.
     """
 
-    def __init__(self, config: MemoryConfig = MemoryConfig(), *, ctx_store: ContextStore):
+    def __init__(
+        self,
+        config: MemoryConfig = MemoryConfig(),
+        *,
+        ctx_store: ContextStore,
+        obs: Optional["Observability"] = None,
+    ):
         super().__init__(config)
         self.ctx_store = ctx_store
+        self._obs = obs if obs is not None else shared_observability()
 
     @classmethod
-    def from_config(cls, config_dict: Dict[str, Any], *, ctx_store: ContextStore) -> "PowerMemory":
+    def from_config(
+        cls, config_dict: Dict[str, Any], *, ctx_store: ContextStore, obs: "Observability | None" = None
+    ) -> "PowerMemory":
         try:
             config = MemoryConfig(**config_dict)
         except ValidationError as e:
             raise ContextValidationError(f"Invalid memory config: {e}") from e
-        return cls(config, ctx_store=ctx_store)
+        return cls(config, ctx_store=ctx_store, obs=obs)
 
     # -- explicit lifecycle ----------------------------------------------------
 
+    @application_op("remember")
     def remember(
         self,
         text: Optional[str] = None,
@@ -113,6 +124,7 @@ class PowerMemory(Memory):
         # (retire/reactivate) mirror onto the existing projection instead.
         return self._finalize_outcome(scope, outcome, project=True)
 
+    @application_op("retire")
     def retire(
         self,
         entry_id: str,
@@ -130,6 +142,7 @@ class PowerMemory(Memory):
         self._sync_vector_state_with_authority(scope, entry_id)
         return self._finalize_outcome(scope, outcome, project=False)
 
+    @application_op("reactivate")
     def reactivate(
         self,
         entry_id: str,
@@ -151,6 +164,7 @@ class PowerMemory(Memory):
         head = self.ctx_store.get_head(scope, entry_id)
         self._sync_vector_state(scope, entry_id, head["state"])
 
+    @application_op("changes")
     def changes(
         self,
         *,
@@ -175,6 +189,7 @@ class PowerMemory(Memory):
             for r in self.ctx_store.list_changes(scope, since_revision=since_revision, limit=limit, cursor=cursor)
         ]
 
+    @application_op("expand")
     def expand(self, citation: MemoryCitation, **ids: Optional[str]) -> EntryVersionBody:
         """Version-exact read with hash re-verification (design §3.2): the
         stored entry version is re-hashed; a mismatch means the evidence
@@ -195,6 +210,7 @@ class PowerMemory(Memory):
             raise EvidenceExpiredError(f"Citation {citation.entry_version_id} failed hash verification")
         return _entry_body(entry)
 
+    @application_op("recall")
     def recall(
         self,
         query: str,
@@ -296,6 +312,170 @@ class PowerMemory(Memory):
                 break
         return merged
 
+    @application_op("revise_bound")
+    def revise_bound(self, memory_id: str, text: str) -> Optional[RememberResult]:
+        """Dual-write sync for legacy PUT (design §5.4): revise the
+        authoritative entry bound to this vector row. Returns None when the
+        row was never adopted (legacy-only entry)."""
+        head = self.ctx_store.get_head_by_vector_id(memory_id)
+        if head is None:
+            return None
+        scope = ScopeIdentity(**{f: head.get(f) for f in SCOPE_FIELDS if head.get(f)})
+        current = self.ctx_store.get_entry_version(scope, head["entry_id"], head["entry_version_id"])
+        outcome = self.ctx_store.revise_entry(
+            scope, head["entry_id"], kind=current.kind, text=text
+        )
+        # The legacy update already rewrote the vector row in place; keep
+        # the binding authoritative for the new version.
+        if outcome.entry is not None and outcome.outcome != OUTCOME_NOOP:
+            self.ctx_store.bind_vector(
+                scope, head["entry_id"],
+                vector_id=memory_id, pending_embed=False,
+                expected_entry_version_id=outcome.entry.entry_version_id,
+            )
+        return self._finalize_outcome(scope, outcome, project=False)
+
+    @application_op("retire_bound")
+    def retire_bound(self, memory_id: str) -> Optional[RememberResult]:
+        """Dual-write tombstone for legacy DELETE (design §5.4): retire the
+        authoritative entry bound to this vector row (the legacy path has
+        already deleted the vector itself)."""
+        head = self.ctx_store.get_head_by_vector_id(memory_id)
+        if head is None:
+            return None
+        scope = ScopeIdentity(**{f: head.get(f) for f in SCOPE_FIELDS if head.get(f)})
+        outcome = self.ctx_store.set_entry_state(scope, head["entry_id"], active=False)
+        if outcome.outcome != OUTCOME_NOOP:
+            self.ctx_store.bind_vector(
+                scope, head["entry_id"],
+                vector_id=None, pending_embed=False,
+                expected_entry_version_id=head["entry_version_id"],
+            )
+        return self._finalize_outcome(scope, outcome, project=False)
+
+    @application_op("adopt")
+    def adopt_legacy(
+        self,
+        *,
+        memory_id: str,
+        text: str,
+        payload: Optional[Dict[str, Any]] = None,
+        **ids: Optional[str],
+    ) -> RememberResult:
+        """Dual-write adoption (design §5.4): bind a vector row written by
+        the legacy add pipeline to the authoritative store WITHOUT
+        re-embedding — the projection already exists. Hash-dedup makes
+        re-adoption (and backfill reruns) a no-op."""
+        scope = ScopeIdentity(**ids)
+        payload = payload or {}
+        outcome = self.ctx_store.remember_entry(
+            scope,
+            kind=str(payload.get("kind") or "fact"),
+            text=text,
+            categories=payload.get("categories") or (),
+            source_refs=(),
+            artifact_refs=(),
+        )
+        if outcome.outcome != OUTCOME_NOOP and outcome.entry is not None:
+            self.ctx_store.bind_vector(
+                scope,
+                outcome.entry.entry_id,
+                vector_id=memory_id,
+                pending_embed=False,
+                expected_entry_version_id=outcome.entry.entry_version_id,
+            )
+        return self._finalize_outcome(scope, outcome, project=False)
+
+    @application_op("backfill")
+    def backfill(self, *, batch_size: int = 500) -> Dict[str, Any]:
+        """Adopt existing vector rows into the authoritative store (design
+        §5.4). Idempotent: adopted entries hash-match to no-op on rerun.
+        Keyset pagination is used where the adapter supports ``after_id``;
+        otherwise a single bounded batch is adopted per call and
+        ``truncated`` reports whether more rows remain."""
+        summary = {"scanned": 0, "created": 0, "noop": 0, "truncated": False}
+        rows = self._list_projection_rows(batch_size + 1)
+        if len(rows) > batch_size:
+            summary["truncated"] = True
+            rows = rows[:batch_size]
+        for row in rows:
+            payload = getattr(row, "payload", None) or {}
+            text = payload.get("data")
+            if not text:
+                continue
+            ids = {f: payload.get(f) for f in SCOPE_FIELDS if payload.get(f)}
+            if not ids:
+                continue
+            summary["scanned"] += 1
+            result = self.adopt_legacy(memory_id=str(row.id), text=text, payload=payload, **ids)
+            summary[result.outcome] = summary.get(result.outcome, 0) + 1
+        return summary
+
+    def _list_projection_rows(self, limit: int):
+        """Normalize the adapter zoo of ``list()`` return shapes: qdrant and
+        pgvector paginate with ``(rows, offset)`` tuples, ES wraps rows in a
+        ``[rows]`` list, others return OutputData or a bare list."""
+        listed = self.vector_store.list(top_k=limit)
+        if isinstance(listed, tuple):
+            return listed[0]
+        if isinstance(listed, list) and listed and isinstance(listed[0], list):
+            return listed[0]
+        return getattr(listed, "results", listed)
+
+    @application_op("reconcile")
+    def reconcile_projections(self, *, limit: int = 100) -> Dict[str, Any]:
+        """Drain pending projections (design §5.2, multi-worker safe):
+
+        - claim: conditional UPDATE flips ``pending_embed`` — exactly one
+          worker wins per entry (same CAS discipline as every write);
+        - project: entries with an existing ``vector_id`` are updated
+          IN PLACE (no duplicate vectors can accumulate across runs);
+        - release: on failure the claim is released so a later pass
+          retries; other entries are unaffected.
+        """
+        summary = {"claimed": 0, "projected": 0, "skipped": 0, "released": 0}
+        for head in self.ctx_store.iter_pending_embed(limit=limit):
+            scope = ScopeIdentity(
+                **{f: head.get(f) for f in SCOPE_FIELDS if head.get(f)}
+            )
+            if not self.ctx_store.claim_pending(scope, head["entry_id"], head["entry_version_id"]):
+                summary["skipped"] += 1
+                continue
+            summary["claimed"] += 1
+            try:
+                entry = self.ctx_store.get_entry_version(
+                    scope, head["entry_id"], head["entry_version_id"]
+                )
+                payload = self._projection_payload(scope, entry)
+                vector = self.embedding_model.embed(entry.text, "add")
+                if head.get("vector_id"):
+                    self.vector_store.update(head["vector_id"], vector=vector, payload=payload)
+                    vector_id = head["vector_id"]
+                else:
+                    vector_id = str(uuid.uuid4())
+                    self.vector_store.insert(vectors=[vector], ids=[vector_id], payloads=[payload])
+                    self.db.add_history(
+                        vector_id, None, entry.text, "ADD",
+                        created_at=payload["created_at"], updated_at=payload["updated_at"],
+                    )
+                self.ctx_store.bind_vector(
+                    scope, entry.entry_id,
+                    vector_id=vector_id, pending_embed=False,
+                    expected_entry_version_id=entry.entry_version_id,
+                )
+                summary["projected"] += 1
+            except Exception:
+                self.ctx_store.bind_vector(
+                    scope, head["entry_id"],
+                    vector_id=head.get("vector_id"), pending_embed=True,
+                    expected_entry_version_id=head["entry_version_id"],
+                )
+                summary["released"] += 1
+                logger.warning(
+                    "Reconciliation released entry %s for retry", head["entry_id"], exc_info=True
+                )
+        return summary
+
     # -- internals ----------------------------------------------------------------
 
     @staticmethod
@@ -319,12 +499,9 @@ class PowerMemory(Memory):
             entry=_entry_body(outcome.entry) if outcome.entry else None,
         )
 
-    def _project_to_vector_store(self, scope: ScopeIdentity, entry: EntryVersionView) -> bool:
-        """Best-effort projection after the authoritative commit (design D3).
-        Any failure — embedder absent, embedder transiently down, vector
-        store down — leaves the authoritative fact durable with
-        ``pending_embed`` set for reconciliation; the request itself never
-        fails on projection problems."""
+    def _projection_payload(self, scope: ScopeIdentity, entry: EntryVersionView) -> Dict[str, Any]:
+        """Single source of the vector projection document — shared by the
+        write path and reconciliation so both produce identical payloads."""
         payload: Dict[str, Any] = {
             "data": entry.text,
             "hash": hashlib.md5(entry.text.encode()).hexdigest(),
@@ -340,6 +517,15 @@ class PowerMemory(Memory):
         }
         if entry.categories:
             payload["categories"] = entry.categories
+        return payload
+
+    def _project_to_vector_store(self, scope: ScopeIdentity, entry: EntryVersionView) -> bool:
+        """Best-effort projection after the authoritative commit (design D3).
+        Any failure — embedder absent, embedder transiently down, vector
+        store down — leaves the authoritative fact durable with
+        ``pending_embed`` set for reconciliation; the request itself never
+        fails on projection problems."""
+        payload = self._projection_payload(scope, entry)
 
         try:
             vector = self.embedding_model.embed(entry.text, "add")

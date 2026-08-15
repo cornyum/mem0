@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
-from auth import verify_auth
+from auth import require_admin, verify_auth
 from context_runtime import get_readiness
 from mem0.context.errors import ContextError
 from mem0.context.models import (
@@ -80,6 +80,23 @@ def recall(req: RecallRequest, _auth=Depends(verify_auth)):
     )
 
 
+@router.post("/v1/memory/reconcile")
+def reconcile(_admin=Depends(require_admin)):
+    """Drain pending vector projections (maintenance, design §5.2)."""
+    memory = get_memory_instance()
+    return memory.reconcile_projections()
+
+
+@router.post("/v1/memory/backfill")
+def backfill(batch_size: int = 500, _admin=Depends(require_admin)):
+    """Adopt existing vector rows into the authoritative store (design
+    §5.4). Idempotent — rerun until truncated=False."""
+    if batch_size < 1 or batch_size > 5000:
+        raise HTTPException(status_code=422, detail="batch_size must be 1..5000")
+    memory = get_memory_instance()
+    return memory.backfill(batch_size=batch_size)
+
+
 @router.post("/v1/memory/retire")
 def retire(req: RetireRequest, _auth=Depends(verify_auth)):
     memory = get_memory_instance()
@@ -133,7 +150,27 @@ def health_ready():
         "checks": [{"name": c.name, "blocking": c.blocking, "state": c.state} for c in report.checks],
     }
     status = 503 if report.state == NOT_READY else 200
+    _set_ready_gauge(report.state)
     return JSONResponse(body, status_code=status, headers={"X-Readiness": report.state})
+
+
+def _set_ready_gauge(state: str) -> None:
+    from context_runtime import get_observability
+
+    code = {"ready": 1.0, "degraded": 0.5, "not_ready": 0.0}.get(state, 0.0)
+    get_observability().meter.set_ready(code)
+
+
+@router.get("/metrics")
+def metrics():
+    """Prometheus exposition (design §8.1). Content-free by construction:
+    labels are bounded vocabularies only."""
+    try:
+        from fastapi.responses import Response
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    except ImportError:
+        return JSONResponse({"detail": "prometheus_client not installed"}, status_code=501)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @router.get("/v1/capabilities")

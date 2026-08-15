@@ -394,6 +394,26 @@ def _persist_request_log(method: str, path: str, status_code: int, latency_ms: f
         session.close()
 
 
+def _record_transport_metric(request: Request, status_code: int, seconds: float) -> None:
+    """Transport metric hook (design §8.1): operation = route TEMPLATE
+    (bounded vocabulary — never the raw path, which carries ids), outcome
+    = success/failure. Fully isolated: a broken meter never affects the
+    response."""
+    try:
+        from context_runtime import get_observability
+        from mem0.context.observability import OUTCOME_FAILURE, OUTCOME_SUCCESS
+
+        route = request.scope.get("route")
+        operation = getattr(route, "path", None) or request.url.path
+        outcome = OUTCOME_FAILURE if status_code >= 500 else OUTCOME_SUCCESS
+        meter = get_observability().meter
+        if meter.enabled:
+            meter.transport_total.labels(operation=operation, outcome=outcome).inc()
+            meter.transport_seconds.labels(operation=operation).observe(seconds)
+    except Exception:
+        logging.debug("transport metric recording failed", exc_info=True)
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request.state.auth_type = getattr(request.state, "auth_type", "none")
@@ -412,6 +432,7 @@ async def log_requests(request: Request, call_next):
         raise
     finally:
         request_id_var.reset(token)
+        _record_transport_metric(request, status_code, time.perf_counter() - start)
         if _should_log_request(request):
             asyncio.get_running_loop().run_in_executor(
                 None,
@@ -469,6 +490,48 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
         raise upstream_error()
 
 
+def _dual_write_adopt(response, params: dict) -> None:
+    """ctx_write_mode=dual (design §5.4): adopt legacy ADD events into the
+    authoritative store without re-embedding. Staging semantics: adoption
+    failures are logged and metricised (application op outcome=failure),
+    they never fail the legacy request."""
+    try:
+        import context_runtime
+
+        if context_runtime.get_ctx_write_mode() != "dual":
+            return
+        memory = get_memory_instance()
+        ids = {k: params.get(k) for k in ("user_id", "agent_id", "run_id", "tenant_id", "session_id") if params.get(k)}
+        for event in (response or {}).get("results", []):
+            if event.get("event") != "ADD" or not event.get("memory"):
+                continue
+            memory.adopt_legacy(
+                memory_id=str(event["id"]),
+                text=event["memory"],
+                payload={"categories": event.get("categories") or []},
+                **ids,
+            )
+    except Exception:
+        logging.warning("dual-write adoption failed (staging phase)", exc_info=True)
+
+
+def _dual_write_sync(memory_id: str, *, text: Optional[str], retire: bool) -> None:
+    """ctx_write_mode=dual: mirror legacy PUT (revise) / DELETE (retire)
+    onto the authoritative store for adopted rows."""
+    try:
+        import context_runtime
+
+        if context_runtime.get_ctx_write_mode() != "dual":
+            return
+        memory = get_memory_instance()
+        if retire:
+            memory.retire_bound(memory_id)
+        elif text is not None:
+            memory.revise_bound(memory_id, text)
+    except Exception:
+        logging.warning("dual-write sync failed (staging phase)", exc_info=True)
+
+
 @app.post("/memories", summary="Create memories")
 def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     """Store new memories."""
@@ -489,6 +552,7 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     try:
         response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        _dual_write_adopt(response, params)
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
         return JSONResponse(content=response)
@@ -639,7 +703,10 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
             params["metadata"] = updated_memory.metadata
         if "expiration_date" in fields_set:
             params["expiration_date"] = updated_memory.expiration_date
-        return get_memory_instance().update(**params)
+        result = get_memory_instance().update(**params)
+        if "text" in fields_set:
+            _dual_write_sync(memory_id, text=updated_memory.text, retire=False)
+        return result
     except (ValueError, Mem0ValidationError) as e:
         raise _client_error(e)
     except Exception:
@@ -660,6 +727,7 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
     """Delete a specific memory by ID."""
     try:
         get_memory_instance().delete(memory_id=memory_id)
+        _dual_write_sync(memory_id, text=None, retire=True)
         return MessageResponse(message="Memory deleted successfully")
     except (ValueError, Mem0ValidationError) as e:
         raise _client_error(e)

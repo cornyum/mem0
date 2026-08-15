@@ -13,6 +13,7 @@ import threading
 from sqlalchemy import text
 
 import db
+from mem0.context.observability import Observability, shared_observability
 from mem0.context.readiness import Probe, ReadinessRegistry
 from mem0.context.store import ContextStore
 
@@ -23,6 +24,7 @@ CTX_TABLE_PREFIX = f"{db.TABLE_PREFIX}ctx_"
 _lock = threading.Lock()
 _ctx_store: ContextStore | None = None
 _readiness: ReadinessRegistry | None = None
+_obs: Observability | None = None
 
 
 def get_context_store() -> ContextStore:
@@ -33,12 +35,46 @@ def get_context_store() -> ContextStore:
         return _ctx_store
 
 
+def get_observability() -> Observability:
+    """One Observability bundle per process (single prometheus
+    registration); rebuilt memory instances reuse it."""
+    global _obs
+    with _lock:
+        if _obs is None:
+            _obs = shared_observability()
+        return _obs
+
+
 def reset_context_runtime() -> None:
     """Test hook: drop cached singletons (fresh engine / fresh instance)."""
-    global _ctx_store, _readiness
+    global _ctx_store, _readiness, _obs
     with _lock:
         _ctx_store = None
         _readiness = None
+        _obs = None
+
+
+CTX_WRITE_MODE_KEY = "ctx_write_mode"
+
+
+def get_ctx_write_mode() -> str:
+    """Dual-write staging switch (design §5.4): "off" (default during P0)
+    or "dual" (legacy writes also land in the authoritative store). Read
+    from the Settings KV so operators can stage the rollout without a
+    restart; storage failure falls back to "off" — the safe default."""
+    try:
+        session = db.SessionLocal()
+        try:
+            from models import Settings
+
+            row = session.get(Settings, CTX_WRITE_MODE_KEY)
+            value = (row.value if row else None) or "off"
+            return value if value in ("off", "dual") else "off"
+        finally:
+            session.close()
+    except Exception:
+        logger.warning("ctx_write_mode lookup failed; defaulting to off", exc_info=True)
+        return "off"
 
 
 class _AppDbProbe(Probe):

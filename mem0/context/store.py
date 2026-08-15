@@ -601,6 +601,40 @@ class ContextStore:
                 .values(vector_id=vector_id, pending_embed=pending_embed, updated_at=_utcnow())
             )
 
+    def claim_pending(
+        self, scope: ScopeIdentity, entry_id: str, entry_version_id: str
+    ) -> bool:
+        """Reconciliation claim (design §5.2): flip ``pending_embed`` to
+        False with a conditional UPDATE — exactly one concurrent worker
+        wins per entry; losers see rowcount 0 and skip. On projection
+        failure the winner releases via :meth:`bind_vector` with
+        ``pending_embed=True``."""
+        clauses = [
+            self.t_heads.c.scope_key == scope.scope_key,
+            self.t_heads.c.artifact_id == self._binding_artifact_id_or_none(scope),
+            self.t_heads.c.entry_id == entry_id,
+            self.t_heads.c.entry_version_id == entry_version_id,
+            self.t_heads.c.pending_embed == True,  # noqa: E712 — SQL boolean
+        ]
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(self.t_heads).where(and_(*clauses)).values(pending_embed=False)
+            )
+            return result.rowcount == 1
+
+    def get_head_by_vector_id(self, vector_id: str) -> Optional[dict[str, Any]]:
+        """Reverse lookup for dual-write wiring (design §5.4): find the
+        authoritative head bound to a legacy vector row id."""
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(self.t_heads).where(self.t_heads.c.vector_id == vector_id).limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            return dict(row) if row else None
+
     def get_artifact_id(self, scope: ScopeIdentity) -> str:
         """The artifact bound to this write-scope — used by expand() to
         validate the citation's artifact reference."""

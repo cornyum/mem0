@@ -142,15 +142,18 @@ def apply_category_instructions(config: Dict[str, Any]) -> Dict[str, Any]:
 def _build_memory(config: Dict[str, Any]) -> PowerMemory:
     """Single construction point for the memory instance (design §8.2):
     initialize_state and update_config share it, so context wiring (ctx
-    store, readiness probes) and any later post-construction wrapping are
-    applied on every hot rebuild — an update_config can never leave a
-    stale instance behind."""
+    store, readiness probes, observability wrappers) is applied on every
+    hot rebuild — an update_config can never leave a stale or unwrapped
+    instance behind."""
     import context_runtime
+    from mem0.context.observability import wrap_memory_for_observation
 
     memory = PowerMemory.from_config(
         apply_category_instructions(config),
         ctx_store=context_runtime.get_context_store(),
+        obs=context_runtime.get_observability(),
     )
+    wrap_memory_for_observation(memory, context_runtime.get_observability())
     context_runtime.set_memory_instance(memory)
     return memory
 
