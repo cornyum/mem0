@@ -49,8 +49,10 @@ class ElasticsearchDB(VectorStoreBase):
                 headers= config.headers or {},
             )
         else:
+            # The 8.x/9.x transport requires an explicit scheme on the URL.
+            scheme = "https" if config.use_ssl else "http"
             self.client = Elasticsearch(
-                hosts=[f"{config.host}" if config.port is None else f"{config.host}:{config.port}"],
+                hosts=[f"{scheme}://{config.host}:{config.port}"],
                 basic_auth=(config.user, config.password) if (config.user and config.password) else None,
                 verify_certs=config.verify_certs,
                 ca_certs=config.ca_certs,
@@ -59,6 +61,12 @@ class ElasticsearchDB(VectorStoreBase):
 
         self.collection_name = config.collection_name
         self.embedding_model_dims = config.embedding_model_dims
+        # Chinese tier (design §6.3): when the analysis-ik plugin is present
+        # the adapter maps/writes/queries the text_zh field (ik_max_word at
+        # index time, ik_smart at query time); without it everything stays on
+        # the baseline metadata fields — the app-layer analyzer tokens remain
+        # the cross-backend contract either way.
+        self._ik_analyzer = self._detect_ik()
 
         # Create index only if auto_create_index is True
         if config.auto_create_index:
@@ -69,29 +77,58 @@ class ElasticsearchDB(VectorStoreBase):
         else:
             self.custom_search_query = None
 
+    def _detect_ik(self) -> bool:
+        """True when the analysis-ik analyzer is usable on this cluster."""
+        try:
+            self.client.indices.analyze(analyzer="ik_max_word", text="插件探测")
+            return True
+        except Exception:
+            logger.info(
+                "analysis-ik not available on the Elasticsearch cluster; "
+                "Chinese retrieval stays on the baseline analyzer fields"
+            )
+            return False
+
     def create_index(self) -> None:
         """Create Elasticsearch index with proper mappings if it doesn't exist"""
+        mappings = {
+            "properties": {
+                "text": {"type": "text"},
+                "vector": {
+                    "type": "dense_vector",
+                    "dims": self.embedding_model_dims,
+                    "index": True,
+                    "similarity": "cosine",
+                },
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        # All five scope ids must be keyword-mapped:
+                        # identity filters are term queries and would
+                        # silently miss on dynamically text-mapped fields.
+                        "user_id": {"type": "keyword"},
+                        "agent_id": {"type": "keyword"},
+                        "run_id": {"type": "keyword"},
+                        "tenant_id": {"type": "keyword"},
+                        "session_id": {"type": "keyword"},
+                    },
+                },
+            }
+        }
+        if self._ik_analyzer:
+            mappings["properties"]["text_zh"] = {
+                "type": "text",
+                "analyzer": "ik_max_word",
+                "search_analyzer": "ik_smart",
+            }
+
         index_settings = {
-            "settings": {"index": {"number_of_replicas": 1, "number_of_shards": 5, "refresh_interval": "1s"}},
-            "mappings": {
-                "properties": {
-                    "text": {"type": "text"},
-                    "vector": {
-                        "type": "dense_vector",
-                        "dims": self.embedding_model_dims,
-                        "index": True,
-                        "similarity": "cosine",
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "properties": {
-                            "user_id": {"type": "keyword"},
-                            "agent_id": {"type": "keyword"},
-                            "run_id": {"type": "keyword"},
-                        },
-                    },
-                }
-            },
+            # Single-shard/zero-replica defaults fit a memory collection on
+            # both single-node dev and small production clusters; operators
+            # with different topologies pre-create the index (auto-create
+            # then leaves it untouched).
+            "settings": {"index": {"number_of_replicas": 0, "number_of_shards": 1, "refresh_interval": "1s"}},
+            "mappings": mappings,
         }
 
         if not self.client.indices.exists(index=self.collection_name):
@@ -128,15 +165,17 @@ class ElasticsearchDB(VectorStoreBase):
 
         actions = []
         for i, (vec, id_) in enumerate(zip(vectors, ids)):
-            action = {
+            source = {
+                "vector": vec,
+                "metadata": payloads[i],  # Store all metadata in the metadata field
+            }
+            if self._ik_analyzer and payloads[i].get("data"):
+                source["text_zh"] = payloads[i]["data"]
+            actions.append({
                 "_index": self.collection_name,
                 "_id": id_,
-                "_source": {
-                    "vector": vec,
-                    "metadata": payloads[i],  # Store all metadata in the metadata field
-                },
-            }
-            actions.append(action)
+                "_source": source,
+            })
 
         bulk(self.client, actions)
 
@@ -196,11 +235,18 @@ class ElasticsearchDB(VectorStoreBase):
         Returns:
             List[OutputData]: Search results with id, score, and payload.
         """
-        # Build a multi_match query across text fields in metadata
-        should_clauses = [
-            {"match": {"metadata.data": query}},
-            {"match": {"metadata.text_lemmatized": query}},
-        ]
+        # Chinese retrieval prefers the ik-analyzed text_zh field when the
+        # plugin tier is active (design §6.3); the baseline analyzer-token
+        # fields stay as additional signals for every deployment shape.
+        should_clauses = []
+        if self._ik_analyzer:
+            should_clauses.append({"match": {"text_zh": query}})
+        should_clauses.extend(
+            [
+                {"match": {"metadata.data": query}},
+                {"match": {"metadata.text_lemmatized": query}},
+            ]
+        )
 
         bool_query = {
             "should": should_clauses,

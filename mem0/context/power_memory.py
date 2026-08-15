@@ -277,12 +277,20 @@ class PowerMemory(Memory):
 
     def _sync_vector_state(self, scope: ScopeIdentity, entry_id: str, state: str) -> None:
         """Mirror a retire/reactivate onto the vector payload so retrieval
-        filters see it immediately (double insurance, design §5.1)."""
+        filters see it immediately (double insurance, design §5.1).
+
+        VectorStoreBase.update REPLACES the payload (pgvector and ES both
+        do), so the merged full payload is written back — flipping only
+        ``state`` would wipe every other field on every backend."""
         head = self.ctx_store.get_head(scope, entry_id)
-        if not head.get("vector_id"):
+        vector_id = head.get("vector_id")
+        if not vector_id:
             return
         try:
-            self.vector_store.update(head["vector_id"], payload={"state": state})
+            current = self.vector_store.get(vector_id)
+            payload = dict(getattr(current, "payload", None) or {})
+            payload["state"] = state
+            self.vector_store.update(vector_id, payload=payload)
         except Exception:
             logger.warning(
                 "Vector state sync failed for entry %s; authoritative state already flipped",

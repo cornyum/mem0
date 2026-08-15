@@ -18,8 +18,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     command: >
-      sh -c "pip install -q --force-reinstall --no-deps /repo && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+      sh -c "pip install -q 'elasticsearch>=8.17,<9' && pip install -q --force-reinstall --no-deps /repo && alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
@@ -30,6 +32,14 @@ services:
       - AUTH_DISABLED=${AUTH_DISABLED:-false}
       - MEM0_TELEMETRY=${MEM0_TELEMETRY:-false}
       - MEM0_WORKERS=${MEM0_WORKERS:-1}
+      # Vector projection tier (design §3.2): ES 8.17 primary, pgvector fallback
+      - VECTOR_STORE_PROVIDER=${VECTOR_STORE_PROVIDER:-elasticsearch}
+      - ES_HOST=${ES_HOST:-elasticsearch}
+      - ES_PORT=${ES_PORT:-9200}
+      - ES_USER=${ES_USER:-elastic}
+      - ES_PASSWORD=${ES_PASSWORD:-es-dev-placeholder}
+      - ES_COLLECTION_NAME=${ES_COLLECTION_NAME:-agentar_mem0}
+      - ES_USE_SSL=${ES_USE_SSL:-false}
 
   postgres:
       image: pgvector/pgvector:pg17
@@ -50,6 +60,32 @@ services:
         - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
       ports:
         - "8432:5432"
+
+  elasticsearch:
+      # Vector + BM25 projection tier (design §3.2, ADR-2) with the analysis-ik
+      # Chinese tokenizer baked in (design §6.3: text_zh = ik_max_word index /
+      # ik_smart query). Single-node dev profile with security disabled;
+      # production deployments enable TLS + auth.
+      build:
+        context: .
+        dockerfile: es.Dockerfile
+      restart: on-failure
+      networks:
+        - mem0_network
+      environment:
+        - discovery.type=single-node
+        - xpack.security.enabled=false
+        - xpack.security.http.ssl.enabled=false
+        - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      healthcheck:
+        test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+        interval: 10s
+        timeout: 5s
+        retries: 30
+      volumes:
+        - es_data:/usr/share/elasticsearch/data
+      ports:
+        - "9200:9200"
 
   mem0-dashboard:
     build: ./dashboard
@@ -72,6 +108,7 @@ services:
 
 volumes:
   postgres_db:
+  es_data:
 
 networks:
   mem0_network:

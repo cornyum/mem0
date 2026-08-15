@@ -231,3 +231,25 @@ def test_expand_rejects_foreign_artifact_id(power_memory):
             ),
             user_id="u1",
         )
+
+
+def test_retire_sync_merges_full_vector_payload(power_memory):
+    """VectorStoreBase.update REPLACES the payload (pgvector/ES alike), so a
+    state flip must merge the current payload back — flipping only `state`
+    would wipe data/identity/citation fields on every backend."""
+    from mem0.context.scope import ScopeIdentity
+
+    power_memory.embedding_model = _StubEmbedder()
+    created = power_memory.remember("不可清除字段", user_id="u1", categories=["关键"])
+    vector_id = power_memory.ctx_store.get_head(
+        ScopeIdentity(user_id="u1"), created.entry.entry_id
+    )["vector_id"]
+
+    power_memory.retire(created.entry.entry_id, user_id="u1")
+
+    payload = power_memory.vector_store.get(vector_id).payload
+    assert payload["state"] == "inactive"
+    assert payload["data"] == "不可清除字段"
+    assert payload["entry_version_id"] == created.entry.entry_version_id
+    assert payload["categories"] == ["关键"]
+    assert payload["user_id"] == "u1"

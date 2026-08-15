@@ -165,10 +165,10 @@ DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-emb
 
 if DASHSCOPE_API_KEY:
     # Bailian (DashScope): Qwen LLM/embedder via the OpenAI-compatible endpoint,
-    # GTE reranker via the native DashScope text-rerank API.
+    # reranker via the native DashScope text-rerank API.
     DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "qwen-plus-latest")
     DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "qwen3.7-text-embedding")
-    DEFAULT_RERANKER_MODEL = os.environ.get("MEM0_DEFAULT_RERANKER_MODEL", "gte-rerank-v2")
+    DEFAULT_RERANKER_MODEL = os.environ.get("MEM0_DEFAULT_RERANKER_MODEL", "qwen3-vl-rerank")
     DEFAULT_EMBEDDING_DIMS = int(os.environ.get("MEM0_EMBEDDING_DIMS", "1024"))
     _llm_config = {
         "provider": "openai",
@@ -190,9 +190,28 @@ else:
     _embedder_config = {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}}
     _reranker_config = None
 
-DEFAULT_CONFIG = {
-    "version": "v1.1",
-    "vector_store": {
+VECTOR_STORE_PROVIDER = os.environ.get("VECTOR_STORE_PROVIDER", "pgvector").strip().lower()
+
+if VECTOR_STORE_PROVIDER == "elasticsearch":
+    # Target topology (design §3.2): ES 8.17 carries the vector + BM25
+    # projection. The adapter's config validator requires credentials even
+    # against a security-disabled local node, so a placeholder pair is the
+    # documented dev default.
+    _vector_store_config = {
+        "provider": "elasticsearch",
+        "config": {
+            "host": os.environ.get("ES_HOST", "elasticsearch"),
+            "port": int(os.environ.get("ES_PORT", "9200")),
+            "user": os.environ.get("ES_USER", "elastic"),
+            "password": os.environ.get("ES_PASSWORD", "es-dev-placeholder"),
+            "collection_name": os.environ.get("ES_COLLECTION_NAME", "agentar_mem0"),
+            "embedding_model_dims": DEFAULT_EMBEDDING_DIMS,
+            "use_ssl": os.environ.get("ES_USE_SSL", "false").strip().lower() == "true",
+            "verify_certs": os.environ.get("ES_VERIFY_CERTS", "false").strip().lower() == "true",
+        },
+    }
+else:
+    _vector_store_config = {
         "provider": "pgvector",
         "config": {
             "host": POSTGRES_HOST,
@@ -203,7 +222,11 @@ DEFAULT_CONFIG = {
             "collection_name": POSTGRES_COLLECTION_NAME,
             "embedding_model_dims": DEFAULT_EMBEDDING_DIMS,
         },
-    },
+    }
+
+DEFAULT_CONFIG = {
+    "version": "v1.1",
+    "vector_store": _vector_store_config,
     "llm": _llm_config,
     "embedder": _embedder_config,
     "history_db_path": HISTORY_DB_PATH,
@@ -286,6 +309,7 @@ class SearchRequest(BaseModel):
     explain: Optional[bool] = Field(None, description="Include score details for each search result.")
     show_expired: Optional[bool] = Field(None, description="Include expired memories.")
     rerank: Optional[bool] = Field(None, description="Rerank results with the configured reranker.")
+    mode: Optional[str] = Field(None, description="Retrieval channels: auto (hybrid, keyword-only fallback without embedder), semantic, or keyword.")
 
 
 class GenerateInstructionsRequest(BaseModel):
@@ -592,6 +616,8 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["show_expired"] = search_req.show_expired
         if search_req.rerank is not None:
             params["rerank"] = search_req.rerank
+        if search_req.mode is not None:
+            params["mode"] = search_req.mode
         return get_memory_instance().search(query=search_req.query, filters=filters, **params)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

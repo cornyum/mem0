@@ -429,3 +429,71 @@ class TestElasticsearchDB(unittest.TestCase):
     def test_list_with_dict_filter_raises(self):
         with self.assertRaises(ValueError):
             self.es_db.list(filters={"user_id": {"$ne": ""}})
+
+
+class TestIkChineseTier(unittest.TestCase):
+    """analysis-ik gating (design §6.3): text_zh is mapped/written/queried
+    only when the plugin answers the analyzer probe."""
+
+    def _make_db(self, ik_ok: bool, auto_create: bool = True) -> ElasticsearchDB:
+        client_mock = MagicMock(spec=Elasticsearch)
+        client_mock.indices = MagicMock()
+        client_mock.indices.exists = MagicMock(return_value=not auto_create)
+        client_mock.indices.create = MagicMock()
+        if ik_ok:
+            client_mock.indices.analyze = MagicMock(return_value={"tokens": []})
+        else:
+            client_mock.indices.analyze = MagicMock(side_effect=Exception("no ik"))
+        patcher = patch("mem0.vector_stores.elasticsearch.Elasticsearch", return_value=client_mock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        db = ElasticsearchDB(
+            host="http://localhost",
+            port=9200,
+            collection_name="ik_test",
+            embedding_model_dims=8,
+            user="u",
+            password="p",
+            use_ssl=False,
+            verify_certs=False,
+            auto_create_index=auto_create,
+        )
+        return db, client_mock
+
+    def test_ik_absent_keeps_baseline_only(self):
+        db, client = self._make_db(ik_ok=False)
+        self.assertFalse(db._ik_analyzer)
+
+        db.create_index()
+        mapping = client.indices.create.call_args.kwargs["body"]["mappings"]["properties"]
+        self.assertNotIn("text_zh", mapping)
+
+        with patch("mem0.vector_stores.elasticsearch.bulk") as bulk_mock:
+            db.insert(vectors=[[0.1] * 8], payloads=[{"data": "中文"}], ids=["a"])
+            source = bulk_mock.call_args.args[1][0]["_source"]
+        self.assertNotIn("text_zh", source)
+        db.keyword_search("中文", top_k=5)
+        body = client.search.call_args.kwargs["body"]
+        fields = [k for clause in body["query"]["bool"]["should"] for k in clause["match"]]
+        self.assertNotIn("text_zh", fields)
+
+    def test_ik_present_enables_text_zh(self):
+        db, client = self._make_db(ik_ok=True)
+        self.assertTrue(db._ik_analyzer)
+
+        db.create_index()
+        mapping = client.indices.create.call_args.kwargs["body"]["mappings"]["properties"]
+        self.assertEqual(
+            mapping["text_zh"],
+            {"type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart"},
+        )
+
+        with patch("mem0.vector_stores.elasticsearch.bulk") as bulk_mock:
+            db.insert(vectors=[[0.1] * 8], payloads=[{"data": "中文事实"}], ids=["a"])
+            source = bulk_mock.call_args.args[1][0]["_source"]
+        self.assertEqual(source["text_zh"], "中文事实")
+
+        db.keyword_search("中文", top_k=5)
+        body = client.search.call_args.kwargs["body"]
+        fields = [k for clause in body["query"]["bool"]["should"] for k in clause["match"]]
+        self.assertEqual(fields[0], "text_zh")
