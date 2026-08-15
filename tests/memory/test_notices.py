@@ -282,11 +282,11 @@ def test_public_search_succeeds_when_first_run_flag_eval_fails(notice_harness, m
     memory = Memory.__new__(Memory)
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=[{"memory": "likes tea"}])
+    memory._search_vector_store = MagicMock(return_value=([{"memory": "likes tea"}], "hybrid"))
 
     result = Memory.search(memory, "favorite drink", filters={"user_id": "u1"})
 
-    assert result == {"results": [{"memory": "likes tea"}]}
+    assert result == {"results": [{"memory": "likes tea"}], "search_mode": "hybrid"}
 
 
 def test_notice_event_bypasses_sampling():
@@ -1510,7 +1510,7 @@ def test_notice_priority_temporal_usage_beats_scale_and_first_run(monkeypatch):
     memory = memory_main.Memory.__new__(memory_main.Memory)
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=[])
+    memory._search_vector_store = MagicMock(return_value=([], "hybrid"))
     calls = []
 
     monkeypatch.setattr(memory_main, "capture_event", lambda *args, **kwargs: None)
@@ -1534,7 +1534,7 @@ def test_notice_priority_scale_beats_first_run(monkeypatch):
     memory = memory_main.Memory.__new__(memory_main.Memory)
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=[])
+    memory._search_vector_store = MagicMock(return_value=([], "hybrid"))
     calls = []
 
     monkeypatch.setattr(memory_main, "capture_event", lambda *args, **kwargs: None)

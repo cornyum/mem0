@@ -183,11 +183,11 @@ def test_search_accepts_tenant_filters_after_validation():
     m.vector_store.keyword_search.return_value = []
     m._entity_store = None
     m.reranker = None
-    with patch.object(m, "_search_vector_store", return_value=[]) as fake_search, patch(
+    with patch.object(m, "_search_vector_store", return_value=([], "hybrid")) as fake_search, patch(
         "mem0.memory.main.display_first_run_notice", lambda *a, **k: None
     ):
         result = m.search("hiking", filters={"tenant_id": "t1", "session_id": "s1"})
-    assert result == {"results": []}
+    assert result == {"results": [], "search_mode": "hybrid"}
     _, args, kwargs = fake_search.mock_calls[0]
     assert args[1] == {"tenant_id": "t1", "session_id": "s1"}
 

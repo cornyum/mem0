@@ -51,6 +51,7 @@ from mem0.memory.notices import (
 from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
+from mem0.context.errors import CapabilityNotSupportedError
 from mem0.memory.utils import (
     extract_json,
     parse_messages,
@@ -209,13 +210,21 @@ def _validate_and_trim_entity_id(value: Optional[Any], name: str) -> Optional[st
     return trimmed
 
 
+SEARCH_MODES = ("auto", "semantic", "keyword")
+
+
+def _validate_search_mode(mode: str) -> None:
+    if mode not in SEARCH_MODES:
+        raise ValueError(f"mode must be one of {SEARCH_MODES}, got {mode!r}")
+
+
 def _validate_search_params(threshold: Optional[float] = None, top_k: Optional[int] = None) -> None:
     """
     Validates search parameters.
 
     Args:
         threshold: Similarity threshold (must be between 0 and 1)
-        top_k: Number of results to return (must be non-negative integer)
+        top_k: Maximum number of results to return (must be non-negative integer)
 
     Raises:
         ValueError: If threshold or top_k are invalid
@@ -1434,6 +1443,7 @@ class Memory(MemoryBase):
         explain: bool = False,
         reference_date: Optional[Any] = None,
         show_expired: bool = False,
+        mode: str = "auto",
         **kwargs,
     ):
         """
@@ -1467,6 +1477,11 @@ class Memory(MemoryBase):
             explain (bool, optional): Whether to include score_details for each result. Defaults to False.
             reference_date (Any, optional): Platform-only temporal parameter. Not supported in OSS.
             show_expired (bool, optional): Include expired memories. Defaults to False.
+            mode (str, optional): Retrieval channel selection — "auto" (default, hybrid with
+                keyword-only fallback when no embedder is configured), "semantic" (vectors only,
+                raises CapabilityNotSupportedError without an embedder), or "keyword" (BM25 only,
+                never embeds). The response reports the channels actually used under
+                "search_mode" and per-result "matched_by".
 
         Returns:
             dict: A dictionary containing the search results under a "results" key.
@@ -1484,6 +1499,7 @@ class Memory(MemoryBase):
 
         # Validate search parameters (before applying defaults)
         _validate_search_params(threshold=threshold, top_k=top_k)
+        _validate_search_mode(mode)
         query = _validate_and_trim_search_query(query)
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
 
@@ -1546,8 +1562,9 @@ class Memory(MemoryBase):
         )
 
         search_start = time.perf_counter()
-        original_memories = self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain, show_expired=show_expired
+        original_memories, search_mode = self._search_vector_store(
+            query, effective_filters, limit, threshold,
+            explain=explain, show_expired=show_expired, mode=mode,
         )
         search_elapsed_seconds = time.perf_counter() - search_start
 
@@ -1574,7 +1591,7 @@ class Memory(MemoryBase):
             )
         else:
             display_first_run_notice(self, "sync", "search")
-        return {"results": original_memories}
+        return {"results": original_memories, "search_mode": search_mode}
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1680,7 +1697,20 @@ class Memory(MemoryBase):
                 return True
         return False
 
-    def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False):
+    def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False, mode="auto"):
+        """Hybrid retrieval over the vector store with channel transparency.
+
+        Returns ``(results, search_mode)`` where ``search_mode`` is one of
+        "hybrid" | "semantic" | "keyword" (the channels that actually ran)
+        and every result carries ``matched_by`` listing the channels that
+        retrieved it (design §6.1):
+
+        - mode="auto": semantic + keyword; falls back to keyword-only when
+          the embedder is a null provider (CapabilityNotSupportedError).
+        - mode="semantic": vectors only — no embedder configured is a hard
+          error, never a silent downgrade.
+        - mode="keyword": BM25 only, the query is never embedded.
+        """
         # Guard against None threshold (backward compat)
         if threshold is None:
             threshold = 0.1
@@ -1689,54 +1719,98 @@ class Memory(MemoryBase):
         query_lemmatized = lemmatize_for_bm25(query)
         query_entities = extract_entities(query)
 
-        # Step 2: Embed query
-        embeddings = self.embedding_model.embed(query, "search")
+        # Step 2: Embed query (channel selection)
+        semantic_channel = mode != "keyword"
+        embeddings = None
+        if semantic_channel:
+            try:
+                embeddings = self.embedding_model.embed(query, "search")
+            except CapabilityNotSupportedError:
+                if mode == "semantic":
+                    raise
+                semantic_channel = False
+                logger.info(
+                    "Embedder not configured; search mode=auto fell back to keyword-only "
+                    "(reported as search_mode in the response)"
+                )
 
         # Step 3: Semantic search (over-fetch for scoring pool)
         internal_limit = max(limit * 4, 60)
-        semantic_results = self.vector_store.search(
-            query=query, vectors=embeddings, top_k=internal_limit, filters=filters
-        )
+        semantic_results = []
+        if semantic_channel:
+            semantic_results = self.vector_store.search(
+                query=query, vectors=embeddings, top_k=internal_limit, filters=filters
+            )
 
         # Step 4: Keyword search (if store supports it)
-        keyword_results = self.vector_store.keyword_search(
-            query=query_lemmatized, top_k=internal_limit, filters=filters
-        )
+        keyword_channel = mode != "semantic"
+        keyword_results = None
+        if keyword_channel:
+            keyword_results = self.vector_store.keyword_search(
+                query=query_lemmatized, top_k=internal_limit, filters=filters
+            )
+        if not semantic_channel and keyword_results is None:
+            logger.warning(
+                "No retrieval channel available: embedder not configured and vector "
+                "store %s has no keyword_search support", self.config.vector_store.provider,
+            )
+            return [], "keyword"
 
         # Step 5: Compute BM25 scores from keyword results
         bm25_scores = {}
+        keyword_ids = set()
         if keyword_results is not None:
             midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
             for mem in keyword_results:
                 mem_id = str(mem.id) if hasattr(mem, 'id') else str(mem.get('id', ''))
+                keyword_ids.add(mem_id)
                 raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
                 if raw_score and raw_score > 0:
                     bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
 
-        # Step 6: Compute entity boosts
+        # Step 6: Compute entity boosts (entity search itself embeds, so the
+        # channel only runs when the semantic channel is active)
         entity_boosts = {}
-        if query_entities:
+        if semantic_channel and query_entities:
             entity_boosts = self._compute_entity_boosts(query_entities, filters)
 
-        # Step 7: Build candidate set from semantic results
+        # Step 7: Build candidate set. With the semantic channel active the
+        # semantic pool defines the candidates (legacy behaviour); in
+        # keyword-only mode the BM25 hits are the pool and their semantic
+        # score is 0, so the BM25 term does all the ranking.
         candidates = []
-        for mem in semantic_results:
-            payload = mem.payload if hasattr(mem, 'payload') else {}
-            if not show_expired and _payload_is_expired(payload):
-                continue
-            mem_id = str(mem.id)
-            candidates.append({
-                "id": mem_id,
-                "score": mem.score,
-                "payload": payload,
-            })
+        semantic_ids = set()
+        if semantic_channel:
+            for mem in semantic_results:
+                payload = mem.payload if hasattr(mem, 'payload') else {}
+                if not show_expired and _payload_is_expired(payload):
+                    continue
+                mem_id = str(mem.id)
+                semantic_ids.add(mem_id)
+                candidates.append({
+                    "id": mem_id,
+                    "score": mem.score,
+                    "payload": payload,
+                })
+        else:
+            for mem in keyword_results or []:
+                payload = mem.payload if hasattr(mem, 'payload') else {}
+                if not show_expired and _payload_is_expired(payload):
+                    continue
+                candidates.append({
+                    "id": str(mem.id),
+                    "score": 0.0,
+                    "payload": payload,
+                })
 
-        # Step 8: Score and rank
+        # Step 8: Score and rank. The threshold gates the *semantic* score
+        # before combining (scoring.py); in keyword-only mode there is no
+        # semantic score to gate, so it must not filter the BM25 pool.
         scored_results = score_and_rank(
             semantic_results=candidates,
             bm25_scores=bm25_scores,
             entity_boosts=entity_boosts,
-            threshold=threshold,
+            threshold=threshold if semantic_channel else 0.0,
             top_k=limit,
             explain=explain,
         )
@@ -1783,9 +1857,19 @@ class Memory(MemoryBase):
             if explain and "score_details" in scored:
                 memory_item_dict["score_details"] = scored["score_details"]
 
+            matched_by = []
+            if scored["id"] in semantic_ids:
+                matched_by.append("semantic")
+            if scored["id"] in keyword_ids:
+                matched_by.append("keyword")
+            if scored["id"] in entity_boosts:
+                matched_by.append("entity")
+            memory_item_dict["matched_by"] = matched_by
+
             original_memories.append(memory_item_dict)
 
-        return original_memories
+        channels = [name for name, active in (("semantic", semantic_channel), ("keyword", keyword_channel)) if active]
+        return original_memories, "hybrid" if len(channels) == 2 else channels[0]
 
     def _compute_entity_boosts(self, query_entities, filters):
         """Compute per-memory entity boosts from entity store search.
@@ -3133,6 +3217,7 @@ class AsyncMemory(MemoryBase):
         explain: bool = False,
         reference_date: Optional[Any] = None,
         show_expired: bool = False,
+        mode: str = "auto",
         **kwargs,
     ):
         """
@@ -3166,6 +3251,11 @@ class AsyncMemory(MemoryBase):
             explain (bool, optional): Whether to include score_details for each result. Defaults to False.
             reference_date (Any, optional): Platform-only temporal parameter. Not supported in OSS.
             show_expired (bool, optional): Include expired memories. Defaults to False.
+            mode (str, optional): Retrieval channel selection — "auto" (default, hybrid with
+                keyword-only fallback when no embedder is configured), "semantic" (vectors only,
+                raises CapabilityNotSupportedError without an embedder), or "keyword" (BM25 only,
+                never embeds). The response reports the channels actually used under
+                "search_mode" and per-result "matched_by".
 
         Returns:
             dict: A dictionary containing the search results under a "results" key.
@@ -3185,6 +3275,7 @@ class AsyncMemory(MemoryBase):
 
         # Validate search parameters (before applying defaults)
         _validate_search_params(threshold=threshold, top_k=top_k)
+        _validate_search_mode(mode)
         query = _validate_and_trim_search_query(query)
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
 
@@ -3249,8 +3340,9 @@ class AsyncMemory(MemoryBase):
         )
 
         search_start = time.perf_counter()
-        original_memories = await self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain, show_expired=show_expired
+        original_memories, search_mode = await self._search_vector_store(
+            query, effective_filters, limit, threshold,
+            explain=explain, show_expired=show_expired, mode=mode
         )
         search_elapsed_seconds = time.perf_counter() - search_start
 
@@ -3280,7 +3372,7 @@ class AsyncMemory(MemoryBase):
             )
         else:
             await display_first_run_notice_async(self, "async", "search")
-        return {"results": original_memories}
+        return {"results": original_memories, "search_mode": search_mode}
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -3386,7 +3478,9 @@ class AsyncMemory(MemoryBase):
                 return True
         return False
 
-    async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False):
+    async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, show_expired=False, mode="auto"):
+        """Async twin of the sync hybrid retrieval — same channel semantics,
+        returns ``(results, search_mode)`` with per-result ``matched_by``."""
         if threshold is None:
             threshold = 0.1
 
@@ -3394,54 +3488,96 @@ class AsyncMemory(MemoryBase):
         query_lemmatized = await asyncio.to_thread(lemmatize_for_bm25, query)
         query_entities = await asyncio.to_thread(extract_entities, query)
 
-        # Step 2: Embed query
-        embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+        # Step 2: Embed query (channel selection)
+        semantic_channel = mode != "keyword"
+        embeddings = None
+        if semantic_channel:
+            try:
+                embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+            except CapabilityNotSupportedError:
+                if mode == "semantic":
+                    raise
+                semantic_channel = False
+                logger.info(
+                    "Embedder not configured; search mode=auto fell back to keyword-only "
+                    "(reported as search_mode in the response)"
+                )
 
         # Step 3: Semantic search (over-fetch)
         internal_limit = max(limit * 4, 60)
-        semantic_results = await asyncio.to_thread(
-            self.vector_store.search, query=query, vectors=embeddings, top_k=internal_limit, filters=filters
-        )
+        semantic_results = []
+        if semantic_channel:
+            semantic_results = await asyncio.to_thread(
+                self.vector_store.search, query=query, vectors=embeddings, top_k=internal_limit, filters=filters
+            )
 
         # Step 4: Keyword search (if store supports it)
-        keyword_results = await asyncio.to_thread(
-            self.vector_store.keyword_search, query=query_lemmatized, top_k=internal_limit, filters=filters
-        )
+        keyword_channel = mode != "semantic"
+        keyword_results = None
+        if keyword_channel:
+            keyword_results = await asyncio.to_thread(
+                self.vector_store.keyword_search, query=query_lemmatized, top_k=internal_limit, filters=filters
+            )
+        if not semantic_channel and keyword_results is None:
+            logger.warning(
+                "No retrieval channel available: embedder not configured and vector "
+                "store %s has no keyword_search support", self.config.vector_store.provider,
+            )
+            return [], "keyword"
 
         # Step 5: Compute BM25 scores
         bm25_scores = {}
+        keyword_ids = set()
         if keyword_results is not None:
             midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
             for mem in keyword_results:
                 mem_id = str(mem.id) if hasattr(mem, 'id') else str(mem.get('id', ''))
+                keyword_ids.add(mem_id)
                 raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
                 if raw_score and raw_score > 0:
                     bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
 
-        # Step 6: Compute entity boosts
+        # Step 6: Compute entity boosts (needs embeddings — semantic channel only)
         entity_boosts = {}
-        if query_entities:
+        if semantic_channel and query_entities:
             entity_boosts = await self._compute_entity_boosts_async(query_entities, filters)
 
-        # Step 7: Build candidate set from semantic results
+        # Step 7: Build candidate set — semantic pool when the semantic
+        # channel is active (legacy behaviour), BM25 hits otherwise (their
+        # semantic score is 0 so the BM25 term does all the ranking).
         candidates = []
-        for mem in semantic_results:
-            payload = mem.payload if hasattr(mem, 'payload') else {}
-            if not show_expired and _payload_is_expired(payload):
-                continue
-            mem_id = str(mem.id)
-            candidates.append({
-                "id": mem_id,
-                "score": mem.score,
-                "payload": payload,
-            })
+        semantic_ids = set()
+        if semantic_channel:
+            for mem in semantic_results:
+                payload = mem.payload if hasattr(mem, 'payload') else {}
+                if not show_expired and _payload_is_expired(payload):
+                    continue
+                mem_id = str(mem.id)
+                semantic_ids.add(mem_id)
+                candidates.append({
+                    "id": mem_id,
+                    "score": mem.score,
+                    "payload": payload,
+                })
+        else:
+            for mem in keyword_results or []:
+                payload = mem.payload if hasattr(mem, 'payload') else {}
+                if not show_expired and _payload_is_expired(payload):
+                    continue
+                candidates.append({
+                    "id": str(mem.id),
+                    "score": 0.0,
+                    "payload": payload,
+                })
 
-        # Step 8: Score and rank
+        # Step 8: Score and rank. The threshold gates the *semantic* score
+        # before combining (scoring.py); in keyword-only mode there is no
+        # semantic score to gate, so it must not filter the BM25 pool.
         scored_results = score_and_rank(
             semantic_results=candidates,
             bm25_scores=bm25_scores,
             entity_boosts=entity_boosts,
-            threshold=threshold,
+            threshold=threshold if semantic_channel else 0.0,
             top_k=limit,
             explain=explain,
         )
@@ -3487,9 +3623,19 @@ class AsyncMemory(MemoryBase):
             if explain and "score_details" in scored:
                 memory_item_dict["score_details"] = scored["score_details"]
 
+            matched_by = []
+            if scored["id"] in semantic_ids:
+                matched_by.append("semantic")
+            if scored["id"] in keyword_ids:
+                matched_by.append("keyword")
+            if scored["id"] in entity_boosts:
+                matched_by.append("entity")
+            memory_item_dict["matched_by"] = matched_by
+
             original_memories.append(memory_item_dict)
 
-        return original_memories
+        channels = [name for name, active in (("semantic", semantic_channel), ("keyword", keyword_channel)) if active]
+        return original_memories, "hybrid" if len(channels) == 2 else channels[0]
 
     async def _compute_entity_boosts_async(self, query_entities, filters):
         """Async version of entity boost computation."""

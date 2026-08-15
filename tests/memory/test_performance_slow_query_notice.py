@@ -71,7 +71,7 @@ def make_sync_memory(search_results=None):
     memory = Memory.__new__(Memory)
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=search_results or [])
+    memory._search_vector_store = MagicMock(return_value=(search_results or [], "hybrid"))
     return memory
 
 
@@ -79,7 +79,7 @@ def make_async_memory(search_results=None):
     memory = AsyncMemory.__new__(AsyncMemory)
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = AsyncMock(return_value=search_results or [])
+    memory._search_vector_store = AsyncMock(return_value=(search_results or [], "hybrid"))
     return memory
 
 
@@ -97,7 +97,7 @@ def test_sync_slow_search_triggers_performance_notice_after_success(monkeypatch)
 
     result = Memory.search(memory, "favorite drink", filters={"user_id": "u1"}, top_k=3)
 
-    assert result == {"results": results}
+    assert result == {"results": results, "search_mode": "hybrid"}
     memory._search_vector_store.assert_called_once()
     performance_notice.assert_called_once_with(memory, "sync", "search", pytest.approx(2.1), 3, 2)
     temporal_notice.assert_not_called()
@@ -198,7 +198,7 @@ async def test_async_slow_search_triggers_performance_notice_after_success(monke
 
     result = await AsyncMemory.search(memory, "favorite drink", filters={"user_id": "u1"}, top_k=4)
 
-    assert result == {"results": results}
+    assert result == {"results": results, "search_mode": "hybrid"}
     memory._search_vector_store.assert_awaited_once()
     performance_notice.assert_awaited_once_with(memory, "async", "search", pytest.approx(2.1), 4, 1)
     temporal_notice.assert_not_awaited()

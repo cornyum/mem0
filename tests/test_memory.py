@@ -196,7 +196,7 @@ def test_search_handles_incomplete_payloads(mock_sqlite, mock_llm_factory, mock_
     mock_embedder.embed.return_value = [0.1, 0.2, 0.3]
     memory.embedding_model = mock_embedder
 
-    result = memory._search_vector_store("test", {"user_id": "test"}, 10)
+    result, _ = memory._search_vector_store("test", {"user_id": "test"}, 10)
 
     # v3 search pipeline skips entries where payload has no "data" key
     assert len(result) == 1
@@ -385,7 +385,7 @@ def test_read_apis_surface_attributed_to(mock_sqlite, mock_llm_factory, mock_vec
     # search
     mock_vector_store.search.return_value = [MockVectorMemory("mem_1", payload, score=0.9)]
     mock_vector_store.keyword_search.return_value = []
-    searched = memory._search_vector_store("python", {"user_id": "u1"}, 10)
+    searched, _ = memory._search_vector_store("python", {"user_id": "u1"}, 10)
     assert searched[0]["attributed_to"] == "user"
     assert "attributed_to" not in (searched[0].get("metadata") or {})
 
@@ -426,7 +426,7 @@ async def test_async_read_apis_surface_attributed_to(mock_sqlite, mock_llm_facto
     # search
     mock_vector_store.search.return_value = [MockVectorMemory("mem_1", payload, score=0.9)]
     mock_vector_store.keyword_search.return_value = []
-    searched = await memory._search_vector_store("python", {"user_id": "u1"}, 10)
+    searched, _ = await memory._search_vector_store("python", {"user_id": "u1"}, 10)
     assert searched[0]["attributed_to"] == "user"
     assert "attributed_to" not in (searched[0].get("metadata") or {})
 

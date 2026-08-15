@@ -13,7 +13,7 @@ def make_sync_memory():
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._add_to_vector_store = MagicMock(return_value=[])
-    memory._search_vector_store = MagicMock(return_value=[])
+    memory._search_vector_store = MagicMock(return_value=([], "hybrid"))
     return memory
 
 
@@ -23,7 +23,7 @@ def make_async_memory():
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._add_to_vector_store = AsyncMock(return_value=[])
-    memory._search_vector_store = AsyncMock(return_value=[])
+    memory._search_vector_store = AsyncMock(return_value=([], "hybrid"))
     return memory
 
 
@@ -92,7 +92,7 @@ def test_sync_search_temporal_query_triggers_notice_after_success(monkeypatch):
 
     result = Memory.search(memory, "what happened last week?", filters={"user_id": "u1"})
 
-    assert result == {"results": []}
+    assert result == {"results": [], "search_mode": "hybrid"}
     memory._search_vector_store.assert_called_once()
     temporal_notice.assert_called_once_with(memory, "sync", "search", "query", "relative_phrase")
     first_run_notice.assert_not_called()
@@ -196,7 +196,7 @@ async def test_async_search_temporal_query_triggers_notice_after_success(monkeyp
 
     result = await AsyncMemory.search(memory, "what happened last week?", filters={"user_id": "u1"})
 
-    assert result == {"results": []}
+    assert result == {"results": [], "search_mode": "hybrid"}
     memory._search_vector_store.assert_awaited_once()
     temporal_notice.assert_awaited_once_with(memory, "async", "search", "query", "relative_phrase")
     first_run_notice.assert_not_awaited()
