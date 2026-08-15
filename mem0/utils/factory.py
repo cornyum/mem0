@@ -17,6 +17,7 @@ from mem0.configs.llms.vllm import VllmConfig
 from mem0.configs.llms.xai import XAIConfig
 from mem0.configs.rerankers.base import BaseRerankerConfig
 from mem0.configs.rerankers.cohere import CohereRerankerConfig
+from mem0.configs.rerankers.dashscope import DashScopeRerankerConfig
 from mem0.configs.rerankers.huggingface import HuggingFaceRerankerConfig
 from mem0.configs.rerankers.llm import LLMRerankerConfig
 from mem0.configs.rerankers.sentence_transformer import (
@@ -232,6 +233,7 @@ class RerankerFactory:
     # Provider mappings with their config classes
     provider_to_class = {
         "cohere": ("mem0.reranker.cohere_reranker.CohereReranker", CohereRerankerConfig),
+        "dashscope": ("mem0.reranker.dashscope_reranker.DashScopeReranker", DashScopeRerankerConfig),
         "sentence_transformer": (
             "mem0.reranker.sentence_transformer_reranker.SentenceTransformerReranker",
             SentenceTransformerRerankerConfig,
