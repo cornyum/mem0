@@ -63,6 +63,18 @@ def main() -> int:
     tok = client.post("/auth/login", json={"email": args.email, "password": args.password}).json()["access_token"]
     headers = {"Authorization": f"Bearer {tok}"}
 
+    def post_with_retry(path, payload, attempts=3):
+        """One slow batch (LLM extraction can exceed a single timeout) must
+        not kill the run: bounded retry with backoff."""
+        last = None
+        for attempt in range(attempts):
+            try:
+                return client.post(path, json=payload, headers=headers)
+            except httpx.TransportError as exc:
+                last = exc
+                time.sleep(5 * (attempt + 1))
+        raise last
+
     dataset = json.load(open(args.locomo))[: args.samples]
     report = {
         "config": {"samples": len(dataset), "sessions_per_sample": args.sessions, "top_k": args.top_k, "judge_model": JUDGE_MODEL},
@@ -92,7 +104,7 @@ def main() -> int:
             ]
             if not messages:
                 continue
-            r = client.post("/memories", json={"messages": messages[:25], **scope}, headers=headers)
+            r = post_with_retry("/memories", {"messages": messages[:25], **scope})
             r.raise_for_status()
             created += sum(1 for e in r.json().get("results", []) if e.get("event") == "ADD")
             report["ingest"]["batches"] += 1
@@ -112,10 +124,9 @@ def main() -> int:
                 continue
             start = time.perf_counter()
             try:
-                r = client.post(
+                r = post_with_retry(
                     "/v1/memory/recall",
-                    json={**scopes[sample_id], "query": question[:2000], "limit": args.top_k, "mode": "auto"},
-                    headers=headers,
+                    {**scopes[sample_id], "query": question[:2000], "limit": args.top_k, "mode": "auto"},
                 )
                 r.raise_for_status()
                 body = r.json()

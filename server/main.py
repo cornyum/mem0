@@ -270,6 +270,11 @@ app.include_router(categories_router.router)
 app.include_router(export_router.router)
 app.include_router(context_router.router)
 
+# MCP projection (design §6.2): mounted last, optional dependency.
+import mcp_server as mcp_server_module  # noqa: E402
+
+mcp_server_module.mount_mcp(app)
+
 
 class Message(BaseModel):
     role: str = Field(..., description="Role of the message (user or assistant).")
