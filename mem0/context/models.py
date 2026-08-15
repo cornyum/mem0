@@ -123,3 +123,14 @@ class ChangeRecordBody(BaseModel):
     provenance: str
     created_at: datetime
     next_cursor: Optional[int] = None
+
+
+class RecallRequest(ScopeParams):
+    """POST /v1/memory/recall — channel-transparent retrieval with
+    authoritative freshness checks (design §5.3/§6.1)."""
+
+    query: str = Field(min_length=1, max_length=8192)
+    limit: int = Field(default=10, ge=1, le=50)
+    mode: str = Field(default="auto", pattern="^(auto|semantic|keyword)$")
+    rerank: bool = Field(default=False)
+    threshold: Optional[float] = Field(default=None, ge=0, le=1)

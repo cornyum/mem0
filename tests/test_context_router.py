@@ -229,3 +229,43 @@ def test_capabilities_reflect_null_providers(client):
     assert caps["embedding"] is False
     assert caps["rerank"] is False
     assert caps["keyword_search"] is True  # qdrant implements keyword_search
+
+
+def test_recall_endpoint_contract(client):
+    """Router fixture runs the null embedder: remember lands authoritative
+    (pending), recall falls back to the keyword/FTS path and merges the
+    pending entry as stale — the read-your-writes contract end to end."""
+    created = client.post(
+        "/v1/memory/remember", json={"user_id": "u1", "text": "路由召回验证事实"}
+    ).json()
+    assert created["pending_embed"] is True
+
+    response = client.post(
+        "/v1/memory/recall",
+        json={"user_id": "u1", "query": "召回验证", "mode": "keyword", "limit": 5},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["search_mode"] == "keyword"
+    assert isinstance(body["results"], list)
+    ids = {(item.get("metadata") or {}).get("entry_id") for item in body["results"]}
+    assert created["entry"]["entry_id"] in ids
+    merged = next(
+        item for item in body["results"]
+        if (item.get("metadata") or {}).get("entry_id") == created["entry"]["entry_id"]
+    )
+    assert merged["stale"] is True
+    assert merged["matched_by"] == ["fts_sidecar"]
+
+
+def test_recall_validation_errors(client):
+    missing_scope = client.post("/v1/memory/recall", json={"query": "x"})
+    assert missing_scope.status_code == 422
+    bad_mode = client.post(
+        "/v1/memory/recall", json={"user_id": "u1", "query": "x", "mode": "banana"}
+    )
+    assert bad_mode.status_code == 422
+    semantic_without_embedder = client.post(
+        "/v1/memory/recall", json={"user_id": "u1", "query": "x", "mode": "semantic"}
+    )
+    assert semantic_without_embedder.status_code == 501

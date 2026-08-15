@@ -1,6 +1,6 @@
 """Context layer REST surface (design §5.3).
 
-POST /v1/memory/remember|retire|reactivate|expand|changes,
+POST /v1/memory/remember|recall|retire|reactivate|expand|changes,
 GET /health/ready (three-state), GET /v1/capabilities.
 
 All context operations are POST + JSON (PowerContext contract style) so
@@ -23,6 +23,7 @@ from mem0.context.models import (
     ChangesRequest,
     ExpandRequest,
     ReactivateRequest,
+    RecallRequest,
     RememberRequest,
     RetireRequest,
 )
@@ -61,6 +62,22 @@ def remember(req: RememberRequest, _auth=Depends(verify_auth)):
         **req.identity_kwargs(),
     )
     return result.model_dump(mode="json")
+
+
+@router.post("/v1/memory/recall")
+def recall(req: RecallRequest, _auth=Depends(verify_auth)):
+    memory = get_memory_instance()
+    kwargs = {}
+    if req.threshold is not None:
+        kwargs["threshold"] = req.threshold
+    return memory.recall(
+        req.query,
+        limit=req.limit,
+        mode=req.mode,
+        rerank=req.rerank,
+        **kwargs,
+        **req.identity_kwargs(),
+    )
 
 
 @router.post("/v1/memory/retire")

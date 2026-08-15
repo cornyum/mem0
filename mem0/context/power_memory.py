@@ -12,6 +12,7 @@ before the vector projection is attempted; a failed projection leaves
 """
 
 import hashlib
+import json
 import logging
 import unicodedata
 import uuid
@@ -193,6 +194,107 @@ class PowerMemory(Memory):
         if recomputed != entry.entry_content_hash:
             raise EvidenceExpiredError(f"Citation {citation.entry_version_id} failed hash verification")
         return _entry_body(entry)
+
+    def recall(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        mode: str = "auto",
+        rerank: bool = False,
+        threshold: float = 0.1,
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        """Channel-transparent retrieval with authoritative freshness
+        checks (design §2.2/§6.1).
+
+        1. vector channels (mode-aware, matched_by attribution);
+        2. every ctx-managed hit is validated against the authoritative
+           head: retired entries and superseded projections are dropped
+           even if the vector payload lags;
+        3. pending entries (authoritative but not yet projected) are merged
+           from the authoritative store via token match and marked
+           ``stale: True`` — the read-your-writes guarantee.
+        """
+        scope = ScopeIdentity(**ids)
+        response = self.search(
+            query,
+            top_k=limit,
+            filters={k: v for k, v in ids.items() if v},
+            threshold=threshold,
+            rerank=rerank,
+            mode=mode,
+        )
+        results = self._validate_against_heads(scope, response["results"])
+        seen = {
+            (item.get("metadata") or {}).get("entry_id") or item.get("id")
+            for item in results
+        }
+        results.extend(
+            self._merge_pending(scope, query, budget=limit - len(results), seen=seen)
+        )
+        return {"search_mode": response["search_mode"], "results": results}
+
+    def _validate_against_heads(self, scope: ScopeIdentity, results: list) -> list:
+        """Drop ctx-managed hits whose authoritative head disagrees with the
+        vector projection (retired, or revised past this projection). Legacy
+        entries without an authoritative record pass through unchanged."""
+        heads = {
+            h["entry_id"]: h
+            for h in self.ctx_store.find_heads(scope, state=None, limit=1000)
+        }
+        kept = []
+        for item in results:
+            meta = item.get("metadata") or {}
+            entry_id = meta.get("entry_id")
+            if not entry_id:
+                kept.append(item)
+                continue
+            head = heads.get(entry_id)
+            if (
+                head is None
+                or head["state"] != ACTIVE
+                or head["entry_version_id"] != meta.get("entry_version_id")
+            ):
+                logger.debug(
+                    "recall dropped stale projection for entry %s (retired or superseded)", entry_id
+                )
+                continue
+            kept.append(item)
+        return kept
+
+    def _merge_pending(self, scope: ScopeIdentity, query: str, *, budget: int, seen: set) -> list:
+        """Read-your-writes: authoritative-but-unprojected entries matching
+        the query tokens are merged as ``stale`` results via the
+        fts_sidecar channel (design §2.2)."""
+        if budget <= 0:
+            return []
+        query_tokens = set(analyzer.analyze(query).split())
+        merged = []
+        for row in self.ctx_store.pending_entries_with_text(scope):
+            if row["entry_id"] in seen:
+                continue
+            if not query_tokens & set(row["searchable_text"].split()):
+                continue
+            merged.append(
+                {
+                    "id": row["entry_id"],
+                    "memory": row["text"],
+                    "score": 0.0,
+                    "matched_by": ["fts_sidecar"],
+                    "stale": True,
+                    "metadata": {
+                        "kind": row["kind"],
+                        "categories": json.loads(row["categories"]),
+                        "entry_id": row["entry_id"],
+                        "entry_version_id": row["entry_version_id"],
+                        "entry_content_hash": row["entry_content_hash"],
+                    },
+                }
+            )
+            if len(merged) >= budget:
+                break
+        return merged
 
     # -- internals ----------------------------------------------------------------
 

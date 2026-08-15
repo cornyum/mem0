@@ -65,3 +65,38 @@ class TestLemmatizeForBm25:
         tokens = result.split()
         for stop in ["this", "is", "a", "very", "of", "the"]:
             assert stop not in tokens
+
+
+class TestCjkAnalyzerPath:
+    """CJK text takes Analyzer v1 regardless of spaCy availability
+    (design §6.3): spaCy's English models cannot segment Chinese, which is
+    exactly the failure this path replaces."""
+
+    def test_cjk_yields_analyzer_tokens(self):
+        from mem0.utils.lemmatization import lemmatize_for_bm25
+
+        tokens = lemmatize_for_bm25("用户偏好深色模式").split()
+        assert "u7528" in tokens  # 用
+        assert "b75286237" in tokens  # 用户 bigram
+        assert all(t == t.lower() and t.isalnum() for t in tokens)
+
+    def test_mixed_text_takes_analyzer_path(self):
+        from mem0.utils.lemmatization import lemmatize_for_bm25
+
+        tokens = lemmatize_for_bm25("Dark 模式切换").split()
+        assert "dark" in tokens
+        assert "u6a21" in tokens  # 模
+
+    def test_write_and_query_normalization_identical(self):
+        from mem0.utils.lemmatization import lemmatize_for_bm25
+
+        assert lemmatize_for_bm25("深色模式") == lemmatize_for_bm25("深色模式")
+
+    def test_has_cjk(self):
+        from mem0.context.analyzer import has_cjk
+
+        assert has_cjk("用户")
+        assert has_cjk("mixed 中文")
+        assert not has_cjk("plain english")
+        assert not has_cjk("")
+        assert not has_cjk(None)  # type: ignore[arg-type]

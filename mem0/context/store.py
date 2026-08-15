@@ -532,6 +532,45 @@ class ContextStore:
                 .all()
             ]
 
+    def pending_entries_with_text(
+        self, scope: ScopeIdentity, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Active heads still awaiting their vector projection, joined with
+        the authoritative text of their head version — the merge source for
+        recall's read-your-writes guarantee (design §2.2). The pending set
+        is bounded by reconciliation, so a plain bounded scan is the right
+        shape; no dialect-specific FTS SQL is needed for correctness."""
+        clauses = [
+            getattr(self.t_heads.c, name) == value for name, value in scope.fields.items()
+        ]
+        clauses.extend([self.t_heads.c.state == ACTIVE, self.t_heads.c.pending_embed])
+        join_on = (
+            (self.t_versions.c.scope_key == self.t_heads.c.scope_key)
+            & (self.t_versions.c.artifact_id == self.t_heads.c.artifact_id)
+            & (self.t_versions.c.entry_id == self.t_heads.c.entry_id)
+            & (self.t_versions.c.entry_version_id == self.t_heads.c.entry_version_id)
+        )
+        with self.engine.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    select(
+                        self.t_heads.c.entry_id,
+                        self.t_heads.c.entry_version_id,
+                        self.t_heads.c.entry_content_hash,
+                        self.t_heads.c.searchable_text,
+                        self.t_versions.c.kind,
+                        self.t_versions.c.text,
+                        self.t_versions.c.categories,
+                    )
+                    .select_from(self.t_heads.join(self.t_versions, join_on))
+                    .where(and_(*clauses))
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            ]
+
     # -- projection binding (post-commit, separate transaction) -----------------
 
     def bind_vector(

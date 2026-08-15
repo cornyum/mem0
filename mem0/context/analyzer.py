@@ -80,3 +80,11 @@ def _cjk_tokens(segment: str) -> list[str]:
     tokens = [f"u{ord(ch):04x}" for ch in segment]
     tokens.extend(f"b{ord(a):04x}{ord(b):04x}" for a, b in zip(segment, segment[1:]))
     return tokens
+
+
+def has_cjk(text: str) -> bool:
+    """True when the text contains any CJK codepoint — the signal for
+    lemmatize_for_bm25 to take the analyzer path instead of spaCy."""
+    if not isinstance(text, str):
+        return False
+    return any(_is_cjk(ord(ch)) for ch in text)
