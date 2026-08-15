@@ -20,8 +20,12 @@ from auth import require_admin, verify_auth
 from context_runtime import get_readiness
 from mem0.context.errors import ContextError
 from mem0.context.models import (
+    CaptureSourceRequest,
     ChangesRequest,
     ExpandRequest,
+    HandoffCommitRequest,
+    HandoffContinueRequest,
+    HandoffPrepareRequest,
     PrepareContextRequest,
     ReactivateRequest,
     RecallRequest,
@@ -120,6 +124,40 @@ def prepare_context(req: PrepareContextRequest, _auth=Depends(verify_auth)):
         mode=req.mode,
         **req.identity_kwargs(),
     )
+
+
+@router.post("/v1/sources/content")
+def capture_source(req: CaptureSourceRequest, _auth=Depends(verify_auth)):
+    """Capture a raw-fact Source into the per-scope journal (design §7)."""
+    memory = get_memory_instance()
+    return memory.capture_source(
+        req.content, metadata=req.metadata, source_type=req.source_type, **req.identity_kwargs()
+    )
+
+
+@router.post("/v1/handoff/prepare")
+def handoff_prepare(req: HandoffPrepareRequest, _auth=Depends(verify_auth)):
+    """Open a handoff over a bounded Source window (design §7)."""
+    memory = get_memory_instance()
+    return memory.prepare_handoff(
+        after=req.after, through=req.through, limit=req.limit, **req.identity_kwargs()
+    )
+
+
+@router.post("/v1/handoff/commit")
+def handoff_commit(req: HandoffCommitRequest, _auth=Depends(verify_auth)):
+    """Commit a handoff draft with strict citation validation (design §7)."""
+    memory = get_memory_instance()
+    return memory.commit_handoff(
+        req.handoff_id, draft=req.draft.model_dump(), **req.identity_kwargs()
+    )
+
+
+@router.post("/v1/handoff/continue")
+def handoff_continue(req: HandoffContinueRequest, _auth=Depends(verify_auth)):
+    """Resolve a committed handoff as explicitly untrusted history (design §7)."""
+    memory = get_memory_instance()
+    return memory.continue_handoff(req.handoff_id, **req.identity_kwargs())
 
 
 @router.post("/v1/memory/retire")

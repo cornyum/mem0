@@ -468,6 +468,140 @@ class PowerMemory(Memory):
             "search_mode": recall["search_mode"],
         }
 
+    @staticmethod
+    def _citation_from_dict(data: Dict[str, Any]) -> "MemoryCitation":
+        from mem0.context.models import MemoryCitation as _MC
+
+        return _MC(
+            artifact_id=data["artifact_id"],
+            entry_id=data["entry_id"],
+            entry_version_id=data["entry_version_id"],
+        )
+
+
+    # -- P2: sources & handoffs (design §7) --------------------------------------
+
+    @application_op("capture_source")
+    def capture_source(
+        self,
+        content: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+        source_type: str = "content",
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        """Capture a raw-fact Source into the per-scope journal (design §7).
+        Sources are the un-truncated evidence layer — the answer to the
+        rolling-window messages table losing original facts."""
+        scope = ScopeIdentity(**ids)
+        return self.ctx_store.capture_source(
+            scope, content=content, metadata=metadata, source_type=source_type
+        )
+
+    @application_op("handoff_prepare")
+    def prepare_handoff(
+        self,
+        *,
+        after: int = 0,
+        through: Optional[int] = None,
+        limit: int = 50,
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        """Bound a Source window and open a handoff artifact (design §7).
+        Without an LLM the draft is produced manually — the window and the
+        handoff record are still created (degraded-mode contract)."""
+        scope = ScopeIdentity(**ids)
+        window = self.ctx_store.read_source_window(scope, after=after, through=through, limit=limit)
+        effective_through = window[-1]["journal_position"] if window else self.ctx_store.journal_position(scope)
+        handoff_id = self.ctx_store.create_handoff(
+            scope, window_after=after, window_through=effective_through, draft="{}"
+        )
+        return {
+            "handoff_id": handoff_id,
+            "window": {"after": after, "through": effective_through, "count": len(window)},
+            "sources": window,
+            "draft_hint": "provide draft JSON on commit; LLM drafting requires an LLM provider",
+        }
+
+    @application_op("handoff_commit")
+    def commit_handoff(
+        self, handoff_id: str, *, draft: Dict[str, Any], **ids: Optional[str]
+    ) -> Dict[str, Any]:
+        """Commit a handoff draft with strict citation validation (design
+        §7): every state/next_action statement carries 1..32 citations and
+        each citation must resolve to a live, hash-verified entry version —
+        the LLM may draft text but can never invent citations."""
+        scope = ScopeIdentity(**ids)
+        validated = self._validate_handoff_draft(scope, draft)
+        self.ctx_store.commit_handoff(scope, handoff_id, draft=json.dumps(validated, ensure_ascii=False))
+        return {"handoff_id": handoff_id, "state": "committed", "statements": len(validated["statements"])}
+
+    @application_op("handoff_continue")
+    def continue_handoff(self, handoff_id: str, **ids: Optional[str]) -> Dict[str, Any]:
+        """Resolve a committed handoff for the next session (design §7):
+        history is returned as explicitly untrusted with per-citation
+        evidence checks — the anti context-poisoning guarantee."""
+        scope = ScopeIdentity(**ids)
+        row = self.ctx_store.get_handoff(scope, handoff_id)
+        if row["state"] != "committed":
+            raise ContextValidationError(f"Handoff {handoff_id} is not committed")
+        draft = json.loads(row["draft"])
+        evidence_checks = []
+        for statement in draft.get("statements", []):
+            for citation in statement.get("citations", []):
+                check = {"citation": citation, "available": False, "reason": None}
+                try:
+                    entry = self.ctx_store.get_entry_version(
+                        scope, citation["entry_id"], citation["entry_version_id"]
+                    )
+                    recomputed = entry_content_hash(
+                        kind=entry.kind, text=entry.text,
+                        source_refs=entry.source_refs, artifact_refs=entry.artifact_refs,
+                        categories=entry.categories,
+                    )
+                    if recomputed != entry.entry_content_hash:
+                        check["reason"] = "hash_mismatch"
+                    else:
+                        head = self.ctx_store.get_head(scope, citation["entry_id"])
+                        check["available"] = head["state"] == ACTIVE
+                        if not check["available"]:
+                            check["reason"] = "retired"
+                except EntryNotFoundError:
+                    check["reason"] = "missing"
+                evidence_checks.append(check)
+        return {
+            "handoff_id": handoff_id,
+            "trust": "untrusted_history",
+            "statements": draft.get("statements", []),
+            "evidence_checks": evidence_checks,
+        }
+
+    def _validate_handoff_draft(self, scope: ScopeIdentity, draft: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(draft, dict) or not draft.get("statements"):
+            raise ContextValidationError("draft.statements must be a non-empty list")
+        artifact_id = self.ctx_store.get_artifact_id(scope)
+        validated_statements = []
+        for statement in draft["statements"]:
+            text = (statement.get("text") or "").strip()
+            if not text:
+                raise ContextValidationError("every statement needs text")
+            citations = statement.get("citations") or []
+            if not 1 <= len(citations) <= 32:
+                raise ContextValidationError(
+                    f"statement citations must be 1..32, got {len(citations)}"
+                )
+            checked = []
+            for citation in citations:
+                citation = dict(citation)
+                citation["artifact_id"] = artifact_id
+                # Resolution + hash re-verification reuse expand's semantics.
+                self.expand(self._citation_from_dict(citation), **scope.fields)
+                checked.append(citation)
+            validated_statements.append({"text": text, "citations": checked})
+        result = dict(draft)
+        result["statements"] = validated_statements
+        return result
+
     @application_op("rebuild")
     def rebuild_projections(self, *, batch_size: int = 200) -> Dict[str, Any]:
         """Rebuild the whole vector projection from the authoritative store

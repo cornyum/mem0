@@ -174,3 +174,88 @@ def build_metadata(prefix: str = DEFAULT_TABLE_PREFIX) -> MetaData:
     )
 
     return metadata
+
+
+def build_p2_names(prefix: str = DEFAULT_TABLE_PREFIX) -> dict[str, str]:
+    return {
+        "sources": f"{prefix}sources",
+        "journal_heads": f"{prefix}source_journal_heads",
+        "lineage_sources": f"{prefix}lineage_sources",
+        "lineage_artifacts": f"{prefix}lineage_artifacts",
+        "handoffs": f"{prefix}handoffs",
+    }
+
+
+def build_p2_metadata(prefix: str = DEFAULT_TABLE_PREFIX) -> MetaData:
+    """P2 table family (design §4/§7): the Source store (raw-fact journal
+    with per-scope monotonic positions), lineage edges (the graph-free
+    replacement for a knowledge graph), and handoff artifacts."""
+    names = build_p2_names(prefix)
+    metadata = MetaData()
+
+    Table(
+        names["sources"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("tenant_id", String(ID_LEN)),
+        Column("user_id", String(ID_LEN)),
+        Column("agent_id", String(ID_LEN)),
+        Column("run_id", String(ID_LEN)),
+        Column("session_id", String(ID_LEN)),
+        Column("source_id", String(128), primary_key=True),
+        Column("source_type", String(32), nullable=False, default="content"),
+        Column("payload", Text, nullable=False),
+        Column("journal_position", Integer, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+        Index(f"ix_{names['sources']}_journal", "scope_key", "journal_position"),
+        Index(
+            f"ix_{names['sources']}_identity",
+            "tenant_id", "user_id", "agent_id", "run_id", "session_id",
+        ),
+    )
+
+    Table(
+        names["journal_heads"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("position", Integer, nullable=False),
+    )
+
+    Table(
+        names["lineage_sources"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("artifact_id", String(UUID_LEN), primary_key=True),
+        Column("entry_id", String(UUID_LEN), primary_key=True),
+        Column("entry_version_id", String(UUID_LEN), primary_key=True),
+        Column("ordinal", Integer, primary_key=True),
+        Column("source_id", String(128), nullable=False),
+    )
+
+    Table(
+        names["lineage_artifacts"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("artifact_id", String(UUID_LEN), primary_key=True),
+        Column("entry_id", String(UUID_LEN), primary_key=True),
+        Column("entry_version_id", String(UUID_LEN), primary_key=True),
+        Column("ordinal", Integer, primary_key=True),
+        Column("upstream_entry_id", String(UUID_LEN), nullable=False),
+        Column("upstream_entry_version_id", String(UUID_LEN), nullable=False),
+    )
+
+    Table(
+        names["handoffs"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("handoff_id", String(UUID_LEN), primary_key=True),
+        Column("state", String(16), nullable=False),  # prepared | committed
+        Column("window_after", Integer, nullable=False),
+        Column("window_through", Integer, nullable=False),
+        Column("draft", Text, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+        Column("committed_at", DateTime(timezone=True)),
+        Index(f"ix_{names['handoffs']}_state", "scope_key", "state"),
+    )
+
+    return metadata

@@ -109,14 +109,23 @@ class ContextStore:
         self.t_versions = self.metadata.tables[self.names["entry_versions"]]
         self.t_heads = self.metadata.tables[self.names["entry_heads"]]
         self.t_memory_heads = self.metadata.tables[self.names["memory_heads"]]
+        # P2 family (design §4/§7): sources, lineage edges, handoffs.
+        self.p2_names = tables.build_p2_names(prefix)
+        self.p2_metadata = tables.build_p2_metadata(prefix)
+        self.t_sources = self.p2_metadata.tables[self.p2_names["sources"]]
+        self.t_journal_heads = self.p2_metadata.tables[self.p2_names["journal_heads"]]
+        self.t_lineage_sources = self.p2_metadata.tables[self.p2_names["lineage_sources"]]
+        self.t_lineage_artifacts = self.p2_metadata.tables[self.p2_names["lineage_artifacts"]]
+        self.t_handoffs = self.p2_metadata.tables[self.p2_names["handoffs"]]
 
     # -- schema lifecycle ---------------------------------------------------
 
     def create_tables(self) -> None:
-        """Create the ctx family. The server normally goes through alembic
-        (which drives the same metadata); this path serves tests and
-        standalone SDK deployments."""
+        """Create the ctx family (P0 core + P2). The server normally goes
+        through alembic (which drives the same metadata); this path serves
+        tests and standalone SDK deployments."""
         self.metadata.create_all(bind=self.engine)
+        self.p2_metadata.create_all(bind=self.engine)
 
     # -- write path -----------------------------------------------------------
 
@@ -212,6 +221,10 @@ class ContextStore:
                     provenance=provenance,
                     created_at=now,
                 )
+            )
+            self._write_lineage(
+                conn, scope.scope_key, artifact_id, entry_id, entry_version_id,
+                source_refs=source_refs, artifact_refs=artifact_refs,
             )
             conn.execute(
                 insert(self.t_heads).values(
@@ -332,6 +345,10 @@ class ContextStore:
                     provenance=NATIVE,
                     created_at=now,
                 )
+            )
+            self._write_lineage(
+                conn, scope.scope_key, artifact_id, entry_id, entry_version_id,
+                source_refs=source_refs, artifact_refs=artifact_refs,
             )
             conn.execute(
                 update(self.t_heads)
@@ -675,6 +692,219 @@ class ContextStore:
             return conn.execute(
                 select(self.t_bindings.c.artifact_id).where(self.t_bindings.c.scope_key == scope.scope_key)
             ).scalar_one_or_none()
+
+    # -- P2: source store / lineage / handoffs ----------------------------------
+
+    def capture_source(
+        self,
+        scope: ScopeIdentity,
+        *,
+        content: str,
+        metadata: Optional[dict] = None,
+        source_type: str = "content",
+        source_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Append a raw-fact Source to the per-scope journal (design §7).
+        Position allocation uses the same conditional-UPDATE CAS as every
+        other write: concurrent captures get strictly distinct monotonic
+        positions or retry."""
+        source_id = source_id or _new_id()
+        payload = json.dumps({"content": content, "metadata": metadata or {}}, ensure_ascii=False)
+
+        def _attempt() -> dict[str, Any]:
+            with self.engine.begin() as conn:
+                position = conn.execute(
+                    select(self.t_journal_heads.c.position).where(
+                        self.t_journal_heads.c.scope_key == scope.scope_key
+                    )
+                ).scalar_one_or_none()
+                if position is None:
+                    conn.execute(
+                        insert(self.t_journal_heads).values(scope_key=scope.scope_key, position=0)
+                    )
+                    position = 0
+                bumped = conn.execute(
+                    update(self.t_journal_heads)
+                    .where(
+                        and_(
+                            self.t_journal_heads.c.scope_key == scope.scope_key,
+                            self.t_journal_heads.c.position == position,
+                        )
+                    )
+                    .values(position=position + 1)
+                )
+                if bumped.rowcount != 1:
+                    raise RevisionConflictError(
+                        scope_key=scope.scope_key, artifact_id="source_journal", expected_revision=position
+                    )
+                values = _identity_values(scope)
+                values.update(
+                    source_id=source_id,
+                    source_type=source_type,
+                    payload=payload,
+                    journal_position=position + 1,
+                    created_at=_utcnow(),
+                )
+                conn.execute(insert(self.t_sources).values(**values))
+            return {"source_id": source_id, "journal_position": position + 1}
+
+        return self._run_cas(_attempt, expected_revision=None)
+
+    def read_source_window(
+        self, scope: ScopeIdentity, *, after: int, through: Optional[int] = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Bounded journal read for handoff windows (design §7)."""
+        clauses = [
+            self.t_sources.c.scope_key == scope.scope_key,
+            self.t_sources.c.journal_position > after,
+        ]
+        if through is not None:
+            clauses.append(self.t_sources.c.journal_position <= through)
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(self.t_sources)
+                .where(and_(*clauses))
+                .order_by(self.t_sources.c.journal_position)
+                .limit(limit)
+            ).mappings().all()
+        out = []
+        for row in rows:
+            payload = json.loads(row.payload)
+            out.append(
+                {
+                    "source_id": row.source_id,
+                    "source_type": row.source_type,
+                    "journal_position": row.journal_position,
+                    "content": payload.get("content"),
+                    "metadata": payload.get("metadata"),
+                }
+            )
+        return out
+
+    def journal_position(self, scope: ScopeIdentity) -> int:
+        with self.engine.connect() as conn:
+            return conn.execute(
+                select(self.t_journal_heads.c.position).where(
+                    self.t_journal_heads.c.scope_key == scope.scope_key
+                )
+            ).scalar_one_or_none() or 0
+
+    def lineage_for_entry(self, scope: ScopeIdentity, entry_id: str) -> dict[str, list]:
+        with self.engine.connect() as conn:
+            artifact_id = self._binding_artifact_id_or_none(scope)
+            sources = [
+                row.source_id
+                for row in conn.execute(
+                    select(self.t_lineage_sources.c.source_id)
+                    .where(
+                        and_(
+                            self.t_lineage_sources.c.scope_key == scope.scope_key,
+                            self.t_lineage_sources.c.artifact_id == artifact_id,
+                            self.t_lineage_sources.c.entry_id == entry_id,
+                        )
+                    )
+                    .order_by(self.t_lineage_sources.c.entry_version_id, self.t_lineage_sources.c.ordinal)
+                )
+            ]
+            artifacts = [
+                (row.upstream_entry_id, row.upstream_entry_version_id)
+                for row in conn.execute(
+                    select(self.t_lineage_artifacts)
+                    .where(
+                        and_(
+                            self.t_lineage_artifacts.c.scope_key == scope.scope_key,
+                            self.t_lineage_artifacts.c.artifact_id == artifact_id,
+                            self.t_lineage_artifacts.c.entry_id == entry_id,
+                        )
+                    )
+                    .order_by(self.t_lineage_artifacts.c.entry_version_id, self.t_lineage_artifacts.c.ordinal)
+                )
+            ]
+        return {"source_refs": sources, "artifact_refs": artifacts}
+
+    # -- P2: handoffs --------------------------------------------------------------
+
+    def create_handoff(
+        self, scope: ScopeIdentity, *, window_after: int, window_through: int, draft: str
+    ) -> str:
+        handoff_id = _new_id()
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(self.t_handoffs).values(
+                    scope_key=scope.scope_key,
+                    handoff_id=handoff_id,
+                    state="prepared",
+                    window_after=window_after,
+                    window_through=window_through,
+                    draft=draft,
+                    created_at=_utcnow(),
+                )
+            )
+        return handoff_id
+
+    def commit_handoff(self, scope: ScopeIdentity, handoff_id: str, *, draft: str) -> None:
+        result = -1
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(self.t_handoffs)
+                .where(
+                    and_(
+                        self.t_handoffs.c.scope_key == scope.scope_key,
+                        self.t_handoffs.c.handoff_id == handoff_id,
+                        self.t_handoffs.c.state == "prepared",
+                    )
+                )
+                .values(state="committed", draft=draft, committed_at=_utcnow())
+            ).rowcount
+        if result != 1:
+            raise EntryNotFoundError(f"Handoff {handoff_id} not found in prepared state")
+
+    def get_handoff(self, scope: ScopeIdentity, handoff_id: str) -> dict[str, Any]:
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(self.t_handoffs).where(
+                        and_(
+                            self.t_handoffs.c.scope_key == scope.scope_key,
+                            self.t_handoffs.c.handoff_id == handoff_id,
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise EntryNotFoundError(f"Handoff {handoff_id} not found")
+        return dict(row)
+
+    def _write_lineage(self, conn, scope_key, artifact_id, entry_id, entry_version_id, *, source_refs, artifact_refs) -> None:
+        """Lineage edges for one immutable entry version (design §3.1): the
+        graph-free replacement — direct evidence as (source, artifact)
+        edge tables."""
+        for ordinal, ref in enumerate(source_refs or []):
+            conn.execute(
+                insert(self.t_lineage_sources).values(
+                    scope_key=scope_key,
+                    artifact_id=artifact_id,
+                    entry_id=entry_id,
+                    entry_version_id=entry_version_id,
+                    ordinal=ordinal,
+                    source_id=str(ref),
+                )
+            )
+        for ordinal, ref in enumerate(artifact_refs or []):
+            upstream_entry_id, _, upstream_version_id = str(ref).partition("@")
+            conn.execute(
+                insert(self.t_lineage_artifacts).values(
+                    scope_key=scope_key,
+                    artifact_id=artifact_id,
+                    entry_id=entry_id,
+                    entry_version_id=entry_version_id,
+                    ordinal=ordinal,
+                    upstream_entry_id=upstream_entry_id,
+                    upstream_entry_version_id=upstream_version_id or upstream_entry_id,
+                )
+            )
 
     # -- internals ----------------------------------------------------------------
 

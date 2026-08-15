@@ -142,3 +142,37 @@ class PrepareContextRequest(ScopeParams):
     query: str = Field(min_length=1, max_length=8192)
     budget_bytes: int = Field(default=8000, ge=512, le=32768)
     mode: str = Field(default="auto", pattern="^(auto|semantic|keyword)$")
+
+
+class CaptureSourceRequest(ScopeParams):
+    """POST /v1/sources/content (design §7)."""
+
+    content: str = Field(min_length=1, max_length=65536)
+    metadata: Optional[dict] = Field(default=None)
+    source_type: str = Field(default="content", max_length=32)
+
+
+class HandoffPrepareRequest(ScopeParams):
+    after: int = Field(default=0, ge=0)
+    through: Optional[int] = Field(default=None, ge=0)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class HandoffStatement(BaseModel):
+    text: str = Field(min_length=1, max_length=8192)
+    citations: list[MemoryCitation] = Field(min_length=1, max_length=32)
+
+
+class HandoffDraft(BaseModel):
+    objective: Optional[str] = Field(default=None, max_length=8192)
+    statements: list[HandoffStatement] = Field(min_length=1, max_length=64)
+    next_action: Optional[str] = Field(default=None, max_length=8192)
+
+
+class HandoffCommitRequest(ScopeParams):
+    handoff_id: str = Field(min_length=1, max_length=64)
+    draft: HandoffDraft
+
+
+class HandoffContinueRequest(ScopeParams):
+    handoff_id: str = Field(min_length=1, max_length=64)
