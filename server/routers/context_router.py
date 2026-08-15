@@ -98,6 +98,17 @@ def backfill(batch_size: int = 500, _admin=Depends(require_admin)):
     return memory.backfill(batch_size=batch_size)
 
 
+@router.post("/v1/memory/rebuild")
+def rebuild(batch_size: int = 200, _admin=Depends(require_admin)):
+    """Rebuild the entire vector projection from the authoritative store
+    (design §3.2, P2 acceptance ④). Operator maintenance — pause writers
+    for a clean cut, then run reconcile afterwards."""
+    if batch_size < 1 or batch_size > 1000:
+        raise HTTPException(status_code=422, detail="batch_size must be 1..1000")
+    memory = get_memory_instance()
+    return memory.rebuild_projections(batch_size=batch_size)
+
+
 @router.post("/v1/context/prepare")
 def prepare_context(req: PrepareContextRequest, _auth=Depends(verify_auth)):
     """Deterministic, byte-budgeted prompt assembly with the trust

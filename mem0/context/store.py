@@ -622,6 +622,33 @@ class ContextStore:
             )
             return result.rowcount == 1
 
+    def iter_heads(
+        self, *, state: Optional[str] = ACTIVE, limit: int = 200, after: Optional[tuple] = None
+    ) -> list[dict[str, Any]]:
+        """Keyset-paginated head scan (scope_key, entry_id ascending) — the
+        rebuild cursor. ``after`` is the last (scope_key, entry_id) pair."""
+        clauses = []
+        if state is not None:
+            clauses.append(self.t_heads.c.state == state)
+        if after is not None:
+            prev_scope, prev_entry = after
+            clauses.append(
+                (self.t_heads.c.scope_key > prev_scope)
+                | ((self.t_heads.c.scope_key == prev_scope) & (self.t_heads.c.entry_id > prev_entry))
+            )
+        with self.engine.connect() as conn:
+            return [
+                dict(row)
+                for row in conn.execute(
+                    select(self.t_heads)
+                    .where(and_(*clauses))
+                    .order_by(self.t_heads.c.scope_key, self.t_heads.c.entry_id)
+                    .limit(limit)
+                )
+                .mappings()
+                .all()
+            ]
+
     def get_head_by_vector_id(self, vector_id: str) -> Optional[dict[str, Any]]:
         """Reverse lookup for dual-write wiring (design §5.4): find the
         authoritative head bound to a legacy vector row id."""

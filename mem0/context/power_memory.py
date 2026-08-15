@@ -468,6 +468,50 @@ class PowerMemory(Memory):
             "search_mode": recall["search_mode"],
         }
 
+    @application_op("rebuild")
+    def rebuild_projections(self, *, batch_size: int = 200) -> Dict[str, Any]:
+        """Rebuild the whole vector projection from the authoritative store
+        (design §3.2, P2 acceptance ④: RPO=0 — the authority is the entire
+        truth). Every ACTIVE head gets a fresh vector row (old bindings are
+        replaced and their stale rows deleted where the adapter supports
+        it); inactive heads keep no projection. Operator-run maintenance:
+        pause writers for a clean cut, then run once and finish with a
+        reconcile pass for anything written during the rebuild."""
+        summary = {"rebuilt": 0, "cleared": 0, "failed": 0}
+        after = None
+        while True:
+            heads = self.ctx_store.iter_heads(state=ACTIVE, limit=batch_size, after=after)
+            if not heads:
+                break
+            for head in heads:
+                after = (head["scope_key"], head["entry_id"])
+                scope = ScopeIdentity(**{f: head.get(f) for f in SCOPE_FIELDS if head.get(f)})
+                try:
+                    entry = self.ctx_store.get_entry_version(
+                        scope, head["entry_id"], head["entry_version_id"]
+                    )
+                    payload = self._projection_payload(scope, entry)
+                    vector = self.embedding_model.embed(entry.text, "add")
+                    new_id = str(uuid.uuid4())
+                    self.vector_store.insert(vectors=[vector], ids=[new_id], payloads=[payload])
+                    old_id = head.get("vector_id")
+                    self.ctx_store.bind_vector(
+                        scope, head["entry_id"],
+                        vector_id=new_id, pending_embed=False,
+                        expected_entry_version_id=head["entry_version_id"],
+                    )
+                    if old_id and old_id != new_id:
+                        try:
+                            self.vector_store.delete(old_id)
+                        except Exception:
+                            logger.debug("stale projection row %s left behind", old_id)
+                    summary["rebuilt"] += 1
+                except Exception:
+                    summary["failed"] += 1
+                    logger.warning("rebuild failed for entry %s", head["entry_id"], exc_info=True)
+        summary["scanned_until"] = after
+        return summary
+
     @application_op("reconcile")
     def reconcile_projections(self, *, limit: int = 100) -> Dict[str, Any]:
         """Drain pending projections (design §5.2, multi-worker safe):
