@@ -36,16 +36,45 @@ def _mock_memory():
     mock_instance.delete_all.return_value = {"message": "Memories deleted"}
     mock_instance.reset.return_value = None
 
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-key", "ADMIN_API_KEY": ""}):
+    import server_state as _server_state
+
+    def _fake_build(_config):
+        # v3: bypass real ES construction — the mock adapter serves the routes
+        return MagicMock(), mock_instance
+
+    # Local sqlite app DB so auth/middleware paths never need a real database.
+    import db as _db
+    import auth as _auth_mod
+    from sqlalchemy import create_engine as _ce
+    from sqlalchemy.orm import sessionmaker as _sm
+    from sqlalchemy.pool import StaticPool
+    _engine = _ce(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    _session = _sm(bind=_engine, autoflush=False, expire_on_commit=False)
+    from models import Base as _Base
+    _Base.metadata.create_all(_engine)
+
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-key", "VECTOR_STORE_PROVIDER": "elasticsearch", "JWT_SECRET": "unit-test-secret", "ADMIN_API_KEY": ""}):
         with patch("mem0.Memory.from_config", return_value=mock_instance):
-            yield mock_instance
+            with patch.object(_server_state, "_build_memory", _fake_build):
+                with patch.object(_db, "engine", _engine), patch.object(_db, "SessionLocal", _session), \
+                        patch.object(_auth_mod, "SessionLocal", _session):
+                    yield mock_instance
+
 
 
 @pytest.fixture
 def client(_mock_memory):
-    """Return a TestClient wired to the server app with mocked Memory."""
+    """Return a TestClient wired to the server app with mocked Memory.
+    Auth is disabled for this suite (parameter-forwarding focus); auth is
+    reloaded first so main picks up the module-level bindings."""
     import server.main as server_main
-    with patch.dict(os.environ, {"ADMIN_API_KEY": ""}):
+    import auth as _auth
+    with patch.dict(os.environ, {"ADMIN_API_KEY": "", "AUTH_DISABLED": "true"}):
+        importlib.reload(_auth)
         importlib.reload(server_main)
     return TestClient(server_main.app)
 

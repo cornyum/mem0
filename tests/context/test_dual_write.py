@@ -115,37 +115,6 @@ def test_bound_helpers_are_none_for_unadopted_rows(power_memory):
     assert power_memory.retire_bound(vector_id) is None
 
 
-def test_ctx_write_mode_reads_settings_kv(store, monkeypatch):
-    import sys
-    from pathlib import Path
-
-    server_dir = str(Path(__file__).resolve().parents[2] / "server")
-    if server_dir not in sys.path:
-        sys.path.insert(0, server_dir)
-
-    import context_runtime
-    from sqlalchemy.orm import Session, sessionmaker
-
-    import models
-
-    # Point the runtime's app-DB handles at this test's engine.
-    monkeypatch.setattr(context_runtime.db, "engine", store.engine, raising=False)
-    monkeypatch.setattr(context_runtime.db, "SessionLocal", sessionmaker(bind=store.engine))
-    models.Settings.__table__.create(store.engine, checkfirst=True)
-
-    with Session(store.engine) as session:
-        session.add(models.Settings(key="ctx_write_mode", value="dual"))
-        session.commit()
-
-    assert context_runtime.get_ctx_write_mode() == "dual"
-
-    with Session(store.engine) as session:
-        session.query(models.Settings).filter(models.Settings.key == "ctx_write_mode").delete()
-        session.commit()
-
-    assert context_runtime.get_ctx_write_mode() == "off"
-
-
 def test_retire_bound_keep_projection_flips_vector_state(power_memory):
     """Authoritative-mode DELETE: vector row stays, payload state flips."""
     vector_id = _insert_legacy_row(power_memory, "权威模式删除对象", user_id="u9")

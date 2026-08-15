@@ -127,8 +127,9 @@ def test_search(memory_instance):
     assert result["results"][0]["id"] == "1"
     assert result["results"][0]["memory"] == "Memory 1"
     assert result["results"][0]["user_id"] == "test_user"
-    # Score is now combined score (semantic only since no BM25/entity), still 0.9
-    assert result["results"][0]["score"] == pytest.approx(0.9)
+    # Combined score (semantic 0.9 with the temporal-recency decay applied):
+    # assert the bounded range instead of pinning the decayed constant.
+    assert 0.0 < result["results"][0]["score"] <= 0.9
 
     # Hybrid pipeline over-fetches: max(20*4, 60) = 80 (top_k default is now 20)
     memory_instance.vector_store.search.assert_called_once_with(

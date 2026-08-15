@@ -32,6 +32,7 @@ from routers import export as export_router
 from routers import requests as requests_router
 from schemas import MessageResponse
 from server_state import (
+    get_app_service,
     get_current_config,
     get_memory_instance,
     initialize_state,
@@ -192,6 +193,16 @@ else:
 
 VECTOR_STORE_PROVIDER = os.environ.get("VECTOR_STORE_PROVIDER", "pgvector").strip().lower()
 
+# Design §3: the v3 storage modes fix the primary provider to Elasticsearch;
+# anything else fails startup (no silent pgvector fallback).
+from context_runtime import STORAGE_MODE as MEMORY_STORAGE_MODE  # noqa: E402
+from mem0.context.vdb import validate_vector_store_provider  # noqa: E402
+
+try:
+    validate_vector_store_provider(VECTOR_STORE_PROVIDER, MEMORY_STORAGE_MODE)
+except ValueError as exc:
+    raise RuntimeError(f"Startup failed: {exc}") from exc
+
 if VECTOR_STORE_PROVIDER == "elasticsearch":
     # Target topology (design §3.2): ES 8.17 carries the vector + BM25
     # projection. The adapter's config validator requires credentials even
@@ -237,6 +248,39 @@ if _reranker_config:
 
 set_session_factory(SessionLocal)
 initialize_state(DEFAULT_CONFIG)
+
+RECONCILE_INTERVAL_SECONDS = int(os.environ.get("RECONCILE_INTERVAL_SECONDS", "30"))
+
+
+def _start_background_reconciler() -> None:
+    """Periodic RecoveryReconciler/EmbeddingReconciler pass (design §5.4:
+    every 30s) plus the HYBRID sidecar sync. All repair actions are
+    deterministic-id upserts, so multiple instances may run concurrently.
+    Set RECONCILE_INTERVAL_SECONDS=0 to disable (tests / operator control)."""
+    import threading
+
+    import context_runtime
+
+    if RECONCILE_INTERVAL_SECONDS <= 0:
+        return
+
+    def _loop():
+        while True:
+            time.sleep(RECONCILE_INTERVAL_SECONDS)
+            try:
+                service = get_app_service()
+                service.reconcile()
+                sidecar = context_runtime.get_hybrid_sidecar()
+                if sidecar is not None:
+                    sidecar.sync_all(service.store)
+            except Exception:
+                logging.debug("background reconcile pass failed", exc_info=True)
+
+    thread = threading.Thread(target=_loop, name="memory-reconciler", daemon=True)
+    thread.start()
+
+
+_start_background_reconciler()
 
 
 app = FastAPI(
@@ -499,51 +543,11 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
         raise upstream_error()
 
 
-def _dual_write_adopt(response, params: dict) -> None:
-    """ctx_write_mode=dual (design §5.4): adopt legacy ADD events into the
-    authoritative store without re-embedding. Staging semantics: adoption
-    failures are logged and metricised (application op outcome=failure),
-    they never fail the legacy request."""
-    try:
-        import context_runtime
-
-        if context_runtime.get_ctx_write_mode() == "off":
-            return
-        memory = get_memory_instance()
-        ids = {k: params.get(k) for k in ("user_id", "agent_id", "run_id", "tenant_id", "session_id") if params.get(k)}
-        for event in (response or {}).get("results", []):
-            if event.get("event") != "ADD" or not event.get("memory"):
-                continue
-            memory.adopt_legacy(
-                memory_id=str(event["id"]),
-                text=event["memory"],
-                payload={"categories": event.get("categories") or []},
-                **ids,
-            )
-    except Exception:
-        logging.warning("dual-write adoption failed (staging phase)", exc_info=True)
-
-
-def _dual_write_sync(memory_id: str, *, text: Optional[str], retire: bool) -> None:
-    """ctx_write_mode in (dual, authoritative): mirror legacy PUT (revise) /
-    DELETE (retire) onto the authoritative store for adopted rows."""
-    try:
-        import context_runtime
-
-        if context_runtime.get_ctx_write_mode() == "off":
-            return
-        memory = get_memory_instance()
-        if retire:
-            memory.retire_bound(memory_id)
-        elif text is not None:
-            memory.revise_bound(memory_id, text)
-    except Exception:
-        logging.warning("dual-write sync failed (staging phase)", exc_info=True)
-
-
 @app.post("/memories", summary="Create memories")
 def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
-    """Store new memories."""
+    """Store new memories. Legacy compat surface (design §7.2): infer=false →
+    remember(append); infer=true → remember(extract); both land in the ES
+    authority through the same MemoryApplicationService as /v1."""
     if not any(
         [
             memory_create.user_id,
@@ -561,7 +565,6 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     try:
         response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
-        _dual_write_adopt(response, params)
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
         return JSONResponse(content=response)
@@ -702,7 +705,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 
 @app.put("/memories/{memory_id}", summary="Update a memory")
 def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
-    """Update an existing memory."""
+    """Update an existing memory. Legacy PUT maps onto /v1 revise (§7.2)."""
     try:
         fields_set = getattr(updated_memory, "model_fields_set", getattr(updated_memory, "__fields_set__", set()))
         params = {"memory_id": memory_id}
@@ -713,8 +716,6 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
         if "expiration_date" in fields_set:
             params["expiration_date"] = updated_memory.expiration_date
         result = get_memory_instance().update(**params)
-        if "text" in fields_set:
-            _dual_write_sync(memory_id, text=updated_memory.text, retire=False)
         return result
     except (ValueError, Mem0ValidationError) as e:
         raise _client_error(e)
@@ -735,24 +736,17 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
 def delete_memory(memory_id: str, purge: bool = False, _auth=Depends(verify_auth)):
     """Delete a memory by ID.
 
-    In authoritative mode DELETE defaults to logical deactivation (design
-    §5.4/P2): the vector row stays with state=inactive and the revision
-    history remains queryable; ``purge=true`` performs the physical
-    delete. Other modes keep the legacy physical-delete behaviour."""
+    DELETE defaults to logical deactivation (design §7.2): the entry stays in
+    the version history with state=inactive; ``purge=true`` performs the
+    physical delete (head + versions removed, audit event kept)."""
     try:
-        import context_runtime
-
-        if context_runtime.get_ctx_write_mode() == "authoritative" and not purge:
-            deactivated = get_memory_instance().retire_bound(memory_id, keep_projection=True)
-            if deactivated is not None:
-                return MessageResponse(
-                    message="Memory deactivated (authoritative mode; pass purge=true for physical delete)"
-                )
-            # Unadopted legacy row: nothing authoritative to retire — fall
-            # through to the physical delete so the request is never a no-op.
-        get_memory_instance().delete(memory_id=memory_id)
-        _dual_write_sync(memory_id, text=None, retire=True)
-        return MessageResponse(message="Memory deleted successfully")
+        get_memory_instance().delete(memory_id=memory_id, purge=purge)
+        message = (
+            "Memory deleted permanently"
+            if purge
+            else "Memory deactivated (pass purge=true for physical delete)"
+        )
+        return MessageResponse(message=message)
     except (ValueError, Mem0ValidationError) as e:
         raise _client_error(e)
     except Exception:

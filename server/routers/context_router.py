@@ -1,44 +1,54 @@
-"""Context layer REST surface (design §5.3).
+"""Context layer REST surface (design v3 §7).
 
-POST /v1/memory/remember|recall|retire|reactivate|expand|changes,
-GET /health/ready (three-state), GET /v1/capabilities.
+/v1/memory/remember|revise|retire|reactivate|recall|expand|changes|get,
+/v1/context/prepare, /health/ready (three-state), /v1/capabilities, and the
+admin namespace /v1/admin/memory/* (design §7.6.2). SQL-dependent extras
+(sources/handoff/artifact-candidates) are 501 in the v3 storage modes until
+they migrate (§7.6.4).
 
-All context operations are POST + JSON (PowerContext contract style) so
-scope ids never land in access-log query strings. The /v1 namespace is
-deliberately separate from the legacy no-prefix routes: context endpoints
-are additive and never change legacy behaviour (ctx_write_mode=off during
-P0). ContextError subclasses translate to their documented status codes
-(409/501/410/422/503) via the route class — one place, no per-endpoint
-try/except.
+Every route delegates to server_state.get_app_service() — no route touches ES
+or SQL directly (design §2 forbidden). Errors return { code, message,
+request_id } with the §7.4 status codes.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
 from auth import require_admin, verify_auth
 from context_runtime import get_readiness
+from errors import request_id_var
 from mem0.context.errors import ContextError
 from mem0.context.models import (
-    CandidateDecideRequest,
-    CandidateListRequest,
-    CandidateProposeRequest,
-    CandidateReviseRequest,
-    CaptureSourceRequest,
     ChangesRequest,
     ExpandRequest,
-    HandoffCommitRequest,
-    HandoffContinueRequest,
-    HandoffPrepareRequest,
+    GetRequest,
     PrepareContextRequest,
     ReactivateRequest,
     RecallRequest,
     RememberRequest,
     RetireRequest,
+    ReviseRequest,
 )
 from mem0.context.readiness import NOT_READY
-from mem0.vector_stores.base import VectorStoreBase
-from server_state import get_memory_instance
+from server_state import get_app_service
+
+logger = logging.getLogger(__name__)
+
+_ERROR_CODES = {
+    "ContextValidationError": ("validation_error", 422),
+    "CapabilityNotSupportedError": ("capability_not_supported", 501),
+    "RevisionConflictError": ("revision_conflict", 409),
+    "EvidenceExpiredError": ("evidence_expired", 410),
+    "EntryNotFoundError": ("entry_not_found", 404),
+    "OperationInProgressError": ("operation_in_progress", 409),
+    "DedupConflictError": ("dedup_conflict", 409),
+    "PrimaryUnavailableError": ("primary_unavailable", 503),
+    "PrimaryConflictError": ("primary_conflict", 503),
+    "PublishedRepairPendingError": ("memory_published_repair_pending", 503),
+}
 
 
 class _ContextRoute(APIRoute):
@@ -49,7 +59,12 @@ class _ContextRoute(APIRoute):
             try:
                 return await original(request)
             except ContextError as exc:
-                raise HTTPException(status_code=exc.default_status_code, detail=str(exc))
+                code, status = _ERROR_CODES.get(type(exc).__name__, (None, exc.default_status_code))
+                rid = request_id_var.get("")
+                return JSONResponse(
+                    status_code=status,
+                    content={"code": code or "context_error", "message": str(exc), "request_id": rid},
+                )
 
         return context_aware_handler
 
@@ -57,165 +72,57 @@ class _ContextRoute(APIRoute):
 router = APIRouter(route_class=_ContextRoute)
 
 
+def _sql_feature_unavailable(feature: str):
+    from mem0.context.errors import CapabilityNotSupportedError
+
+    raise CapabilityNotSupportedError(
+        f"{feature} depends on the legacy SQL store and is unavailable in the v3 storage modes; "
+        "it returns after its ES migration (design §7.6.4)"
+    )
+
+
 @router.post("/v1/memory/remember")
 def remember(req: RememberRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    result = memory.remember(
+    service = get_app_service()
+    return service.remember(
         req.text,
+        messages=req.messages,
         mode=req.mode,
         kind=req.kind,
         categories=req.categories,
-        source_refs=tuple(req.source_refs),
-        artifact_refs=tuple(req.artifact_refs),
+        source_refs=req.source_refs,
+        artifact_refs=req.artifact_refs,
+        metadata=req.metadata,
+        expires_at=req.expires_at,
+        expected_revision=req.expected_revision,
+        **req.identity_kwargs(),
+    )
+
+
+@router.post("/v1/memory/revise")
+def revise(req: ReviseRequest, _auth=Depends(verify_auth)):
+    """Explicit revision of one entry (design §7.6.1); Legacy PUT
+    /memories/{id} maps onto this same command."""
+    service = get_app_service()
+    result = service.revise(
+        req.entry_id,
+        text=req.text,
+        kind=req.kind,
+        categories=req.categories,
+        source_refs=req.source_refs,
+        artifact_refs=req.artifact_refs,
+        metadata=req.metadata,
+        expires_at=req.expires_at,
         expected_revision=req.expected_revision,
         **req.identity_kwargs(),
     )
     return result.model_dump(mode="json")
 
 
-@router.post("/v1/memory/recall")
-def recall(req: RecallRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    kwargs = {}
-    if req.threshold is not None:
-        kwargs["threshold"] = req.threshold
-    return memory.recall(
-        req.query,
-        limit=req.limit,
-        mode=req.mode,
-        rerank=req.rerank,
-        **kwargs,
-        **req.identity_kwargs(),
-    )
-
-
-@router.post("/v1/memory/reconcile")
-def reconcile(_admin=Depends(require_admin)):
-    """Drain pending vector projections (maintenance, design §5.2)."""
-    memory = get_memory_instance()
-    return memory.reconcile_projections()
-
-
-@router.post("/v1/memory/backfill")
-def backfill(batch_size: int = 500, _admin=Depends(require_admin)):
-    """Adopt existing vector rows into the authoritative store (design
-    §5.4). Idempotent — rerun until truncated=False."""
-    if batch_size < 1 or batch_size > 5000:
-        raise HTTPException(status_code=422, detail="batch_size must be 1..5000")
-    memory = get_memory_instance()
-    return memory.backfill(batch_size=batch_size)
-
-
-@router.post("/v1/memory/rebuild")
-def rebuild(batch_size: int = 200, _admin=Depends(require_admin)):
-    """Rebuild the entire vector projection from the authoritative store
-    (design §3.2, P2 acceptance ④). Operator maintenance — pause writers
-    for a clean cut, then run reconcile afterwards."""
-    if batch_size < 1 or batch_size > 1000:
-        raise HTTPException(status_code=422, detail="batch_size must be 1..1000")
-    memory = get_memory_instance()
-    return memory.rebuild_projections(batch_size=batch_size)
-
-
-@router.post("/v1/context/prepare")
-def prepare_context(req: PrepareContextRequest, _auth=Depends(verify_auth)):
-    """Deterministic, byte-budgeted prompt assembly with the trust
-    envelope (design §6.4)."""
-    memory = get_memory_instance()
-    return memory.prepare_context(
-        req.query,
-        budget_bytes=req.budget_bytes,
-        mode=req.mode,
-        **req.identity_kwargs(),
-    )
-
-
-@router.post("/v1/sources/content")
-def capture_source(req: CaptureSourceRequest, _auth=Depends(verify_auth)):
-    """Capture a raw-fact Source into the per-scope journal (design §7)."""
-    memory = get_memory_instance()
-    return memory.capture_source(
-        req.content, metadata=req.metadata, source_type=req.source_type, **req.identity_kwargs()
-    )
-
-
-@router.post("/v1/handoff/prepare")
-def handoff_prepare(req: HandoffPrepareRequest, _auth=Depends(verify_auth)):
-    """Open a handoff over a bounded Source window (design §7)."""
-    memory = get_memory_instance()
-    return memory.prepare_handoff(
-        after=req.after, through=req.through, limit=req.limit, **req.identity_kwargs()
-    )
-
-
-@router.post("/v1/handoff/commit")
-def handoff_commit(req: HandoffCommitRequest, _auth=Depends(verify_auth)):
-    """Commit a handoff draft with strict citation validation (design §7)."""
-    memory = get_memory_instance()
-    return memory.commit_handoff(
-        req.handoff_id, draft=req.draft.model_dump(), **req.identity_kwargs()
-    )
-
-
-@router.post("/v1/handoff/continue")
-def handoff_continue(req: HandoffContinueRequest, _auth=Depends(verify_auth)):
-    """Resolve a committed handoff as explicitly untrusted history (design §7)."""
-    memory = get_memory_instance()
-    return memory.continue_handoff(req.handoff_id, **req.identity_kwargs())
-
-
-@router.post("/v1/artifact-candidates/propose")
-def candidate_propose(req: CandidateProposeRequest, _auth=Depends(verify_auth)):
-    """Submit an experience/skill candidate (untrusted, out of retrieval)."""
-    memory = get_memory_instance()
-    return memory.propose_candidate(
-        family=req.family, proposal=req.proposal,
-        source_refs=req.source_refs, reason=req.reason, **req.identity_kwargs(),
-    )
-
-
-@router.post("/v1/artifact-candidates/list")
-def candidate_list(req: CandidateListRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    status = None if req.status == "all" else req.status
-    return memory.list_candidates(status=status, limit=req.limit, **req.identity_kwargs())
-
-
-@router.post("/v1/artifact-candidates/revise")
-def candidate_revise(req: CandidateReviseRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    return memory.revise_candidate(
-        req.candidate_id, proposal=req.proposal, source_refs=req.source_refs,
-        reason=req.reason, expected_version=req.expected_version, **req.identity_kwargs(),
-    )
-
-
-@router.post("/v1/artifact-candidates/approve")
-def candidate_approve(req: CandidateDecideRequest, _admin=Depends(require_admin)):
-    """Approve is the review gate (admin): atomic entry creation + terminal
-    candidate state (design §7)."""
-    memory = get_memory_instance()
-    return memory.decide_candidate(
-        req.candidate_id, approve=True,
-        expected_version=req.expected_version, decision_reason=req.decision_reason,
-        **req.identity_kwargs(),
-    )
-
-
-@router.post("/v1/artifact-candidates/reject")
-def candidate_reject(req: CandidateDecideRequest, _admin=Depends(require_admin)):
-    memory = get_memory_instance()
-    return memory.decide_candidate(
-        req.candidate_id, approve=False,
-        expected_version=req.expected_version, decision_reason=req.decision_reason,
-        **req.identity_kwargs(),
-    )
-
-
 @router.post("/v1/memory/retire")
 def retire(req: RetireRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    result = memory.retire(
+    service = get_app_service()
+    result = service.retire(
         req.entry_id,
         reason=req.reason,
         expected_revision=req.expected_revision,
@@ -226,8 +133,8 @@ def retire(req: RetireRequest, _auth=Depends(verify_auth)):
 
 @router.post("/v1/memory/reactivate")
 def reactivate(req: ReactivateRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    result = memory.reactivate(
+    service = get_app_service()
+    result = service.reactivate(
         req.entry_id,
         reason=req.reason,
         expected_revision=req.expected_revision,
@@ -236,17 +143,33 @@ def reactivate(req: ReactivateRequest, _auth=Depends(verify_auth)):
     return result.model_dump(mode="json")
 
 
+@router.post("/v1/memory/recall")
+def recall(req: RecallRequest, _auth=Depends(verify_auth)):
+    service = get_app_service()
+    kwargs = {}
+    if req.threshold is not None:
+        kwargs["threshold"] = req.threshold
+    return service.recall(
+        req.query,
+        limit=req.limit,
+        mode=req.mode,
+        rerank=req.rerank,
+        **kwargs,
+        **req.identity_kwargs(),
+    )
+
+
 @router.post("/v1/memory/expand")
 def expand(req: ExpandRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    body = memory.expand(req.citation, **req.identity_kwargs())
+    service = get_app_service()
+    body = service.expand(req.citation, **req.identity_kwargs())
     return body.model_dump(mode="json")
 
 
 @router.post("/v1/memory/changes")
 def changes(req: ChangesRequest, _auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    records = memory.changes(
+    service = get_app_service()
+    records = service.changes(
         since_revision=req.since_revision,
         limit=req.limit,
         cursor=req.cursor,
@@ -255,10 +178,159 @@ def changes(req: ChangesRequest, _auth=Depends(verify_auth)):
     return {"changes": [r.model_dump(mode="json") for r in records]}
 
 
+@router.post("/v1/memory/get")
+def get(req: GetRequest, _auth=Depends(verify_auth)):
+    """Point read of the current head by entry_id (design §7.6.1)."""
+    service = get_app_service()
+    return service.get(req.entry_id, **req.identity_kwargs())
+
+
+@router.post("/v1/context/prepare")
+def prepare_context(req: PrepareContextRequest, _auth=Depends(verify_auth)):
+    """Deterministic, byte-budgeted prompt assembly with the trust
+    envelope (design §6.4)."""
+    service = get_app_service()
+    return service.prepare_context(
+        req.query,
+        budget_bytes=req.budget_bytes,
+        mode=req.mode,
+        **req.identity_kwargs(),
+    )
+
+
+# -- SQL-dependent extras: 501 until migrated (design §7.6.4) -----------------
+
+
+@router.post("/v1/sources/content")
+def capture_source( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("sources")
+
+
+@router.post("/v1/handoff/prepare")
+def handoff_prepare( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("handoff")
+
+
+@router.post("/v1/handoff/commit")
+def handoff_commit( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("handoff")
+
+
+@router.post("/v1/handoff/continue")
+def handoff_continue( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("handoff")
+
+
+@router.post("/v1/artifact-candidates/propose")
+def candidate_propose( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("artifact-candidates")
+
+
+@router.post("/v1/artifact-candidates/list")
+def candidate_list( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("artifact-candidates")
+
+
+@router.post("/v1/artifact-candidates/revise")
+def candidate_revise( _auth=Depends(verify_auth)):
+    _sql_feature_unavailable("artifact-candidates")
+
+
+@router.post("/v1/artifact-candidates/approve")
+def candidate_approve( _admin=Depends(require_admin)):
+    _sql_feature_unavailable("artifact-candidates")
+
+
+@router.post("/v1/artifact-candidates/reject")
+def candidate_reject( _admin=Depends(require_admin)):
+    _sql_feature_unavailable("artifact-candidates")
+
+
+# -- admin namespace (design §7.6.2) -------------------------------------------
+
+
+@router.post("/v1/admin/memory/reconcile")
+def admin_reconcile(_admin=Depends(require_admin)):
+    """Trigger RecoveryReconciler / EmbeddingReconciler (design §5.4)."""
+    service = get_app_service()
+    counts = service.reconcile()
+    sidecar_counts = _sync_hybrid_sidecar(service)
+    if sidecar_counts:
+        counts["hybrid_sidecar"] = sidecar_counts
+    return counts
+
+
+@router.post("/v1/admin/memory/rebuild")
+def admin_rebuild(_admin=Depends(require_admin)):
+    """Rebuild heads from version/event (design §7.6.2)."""
+    service = get_app_service()
+    return service.rebuild_heads()
+
+
+@router.post("/v1/admin/memory/backfill")
+def admin_backfill(_admin=Depends(require_admin)):
+    """Legacy vector-row import — superseded by /v1/admin/memory/migrate for
+    the ES authority; kept for the one-version deprecation window."""
+    _sql_feature_unavailable("backfill")
+
+
+@router.post("/v1/admin/memory/migrate")
+def admin_migrate(dry_run: bool = True, _admin=Depends(require_admin)):
+    """SQL ctx → ES authority migration task (design §9). Runs read-only
+    unless dry_run=false. The migration tool lives in
+    server/scripts/migrate_ctx_to_es.py; this endpoint executes it in-process."""
+    from scripts.migrate_ctx_to_es import migrate_ctx_to_es
+
+    service = get_app_service()
+    return migrate_ctx_to_es(service.store, dry_run=dry_run)
+
+
+def _sync_hybrid_sidecar(service):
+    import context_runtime
+
+    sidecar = context_runtime.get_hybrid_sidecar()
+    if sidecar is None:
+        return None
+    try:
+        return sidecar.sync_all(service.store)
+    except Exception:
+        logger.warning("Hybrid sidecar sync failed", exc_info=True)
+        return {"error": "sync_failed"}
+
+
+# -- deprecated legacy paths (design §7.6.2: one version, then removal) --------
+
+
+def _deprecated(response: JSONResponse) -> JSONResponse:
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "yes"
+    return response
+
+
+@router.post("/v1/memory/reconcile")
+def reconcile(_admin=Depends(require_admin)):
+    result = admin_reconcile(_admin)
+    return _deprecated(JSONResponse(result))
+
+
+@router.post("/v1/memory/rebuild")
+def rebuild(_admin=Depends(require_admin)):
+    result = admin_rebuild(_admin)
+    return _deprecated(JSONResponse(result))
+
+
+@router.post("/v1/memory/backfill")
+def backfill(_admin=Depends(require_admin)):
+    _sql_feature_unavailable("backfill")
+
+
+# -- health / metrics / capabilities ---------------------------------------------
+
+
 @router.get("/health/ready")
 def health_ready():
     report = get_readiness().evaluate()
-    # degraded stays in rotation by design (design §3.5): only a blocking
+    # degraded stays in rotation by design (design §10): only a blocking
     # failure pulls the server out. The state is visible in body + header.
     body = {
         "state": report.state,
@@ -290,16 +362,12 @@ def metrics():
 
 @router.get("/v1/capabilities")
 def capabilities(_auth=Depends(verify_auth)):
-    memory = get_memory_instance()
-    keyword_supported = getattr(type(memory.vector_store), "keyword_search", None) is not VectorStoreBase.keyword_search
-    return {
-        "memory": {
-            "explicit_lifecycle": True,
-            "extraction": memory.config.llm.provider != "null",
-            "embedding": memory.config.embedder.provider != "null",
-            "rerank": memory.reranker is not None,
-            "keyword_search": keyword_supported,
-        },
-        "handoff": False,  # P2 (design §7)
-        "review_inbox": False,  # P2 (design §7)
-    }
+    """Real probes only (design §10): extraction/semantic/keyword/sql fallback
+    reflect what actually works, never the config file."""
+    service = get_app_service()
+    caps = service.capabilities()
+    caps["memory"]["prepare_context"] = True
+    caps["sources"] = False
+    caps["handoff"] = False
+    caps["review_inbox"] = False
+    return caps

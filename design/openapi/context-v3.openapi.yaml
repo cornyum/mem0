@@ -1,0 +1,847 @@
+openapi: 3.0.3
+info:
+  title: Agentar Memory v3 — Third-party Memory API
+  version: 3.0.0
+  description: |
+    第三方系统稳定接入面。所有领域接口 POST + JSON，scope 放在请求体，不进入 URL。
+    鉴权：Authorization: Bearer <JWT> 或 X-API-Key: <API_KEY>。
+servers:
+  - url: http://localhost:8888
+    description: Local / default compose
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+tags:
+  - name: memory
+    description: 记忆加工、落库、召回、生命周期与审计
+paths:
+  /v1/memory/remember:
+    post:
+      tags: [memory]
+      operationId: remember
+      summary: 统一记忆写入入口
+      description: |
+        mode=append：零 LLM 直写，内容 hash 去重。
+        mode=auto：text 走 append；messages 走 extract。
+        mode=extract：LLM 加工，能力缺失时 501。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RememberRequest'
+      responses:
+        '200':
+          description: created / updated / noop
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RememberResult'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: revision_conflict 或 operation_in_progress
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '501':
+          description: extract 能力缺失
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: 主存储不可用或发布修复中
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/revise:
+    post:
+      tags: [memory]
+      operationId: revise
+      summary: 显式修订指定 entry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviseRequest' }
+      responses:
+        '200':
+          description: 修订成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RememberResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: revision_conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: 主存储不可用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/retire:
+    post:
+      tags: [memory]
+      operationId: retire
+      summary: 逻辑失效
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RetireRequest' }
+      responses:
+        '200':
+          description: 失效成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RememberResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: entry 不存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: revision_conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: 主存储不可用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/reactivate:
+    post:
+      tags: [memory]
+      operationId: reactivate
+      summary: 重新激活
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReactivateRequest' }
+      responses:
+        '200':
+          description: 激活成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RememberResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: entry 不存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: revision_conflict 或内容被其他 entry 持有
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: 主存储不可用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/recall:
+    post:
+      tags: [memory]
+      operationId: recall
+      summary: 统一记忆召回
+      description: |
+        mode=auto：ES kNN ∪ BM25，候选并集 + RRF。
+        mode=semantic：仅向量。
+        mode=keyword：仅 BM25。
+        HYBRID_STORAGE 下 ES 运行故障时，auto/keyword 可返回 storage_source=sql_fts。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecallRequest' }
+      responses:
+        '200':
+          description: 召回成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecallResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '501':
+          description: semantic 能力缺失
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: 主存储不可用且无兜底
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/expand:
+    post:
+      tags: [memory]
+      operationId: expand
+      summary: 版本精确重读 + hash 校验
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExpandRequest' }
+      responses:
+        '200':
+          description: 精确版本内容
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EntryVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: citation 不存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '410':
+          description: hash 校验失败，证据已变化
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/changes:
+    post:
+      tags: [memory]
+      operationId: changes
+      summary: revision 游标读取变化事件
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangesRequest' }
+      responses:
+        '200':
+          description: 变化事件列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChangesResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/memory/get:
+    post:
+      tags: [memory]
+      operationId: getMemory
+      summary: 按 entry_id 读取当前 Head
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GetMemoryRequest' }
+      responses:
+        '200':
+          description: 当前 Head
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemoryHeadResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: entry 不存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/context/prepare:
+    post:
+      tags: [memory]
+      operationId: prepareContext
+      summary: 带 citation 的预算化上下文装配
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrepareContextRequest' }
+      responses:
+        '200':
+          description: PreparedContext
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PrepareContextResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422':
+          description: 参数校验失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: 主存储不可用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /v1/capabilities:
+    get:
+      tags: [memory]
+      operationId: getCapabilities
+      summary: 能力与存储模式声明
+      security: []
+      responses:
+        '200':
+          description: 能力声明
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Capabilities' }
+
+  /health/ready:
+    get:
+      tags: [memory]
+      operationId: healthReady
+      summary: 三态 readiness
+      security: []
+      responses:
+        '200':
+          description: ready / degraded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResult' }
+        '503':
+          description: not_ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResult' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  responses:
+    Unauthorized:
+      description: 未认证
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    ScopeIds:
+      type: object
+      description: 至少提供一个。写入时所有出现字段共同构成 scope_key。
+      properties:
+        tenant_id:
+          type: string
+          maxLength: 256
+          nullable: true
+        user_id:
+          type: string
+          maxLength: 256
+          nullable: true
+        agent_id:
+          type: string
+          maxLength: 256
+          nullable: true
+        run_id:
+          type: string
+          maxLength: 256
+          nullable: true
+        session_id:
+          type: string
+          maxLength: 256
+          nullable: true
+
+    RememberRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          properties:
+            text:
+              type: string
+              nullable: true
+              maxLength: 8192
+              description: append/auto(text) 必填；UTF-8 字节上限 8192。
+            messages:
+              type: array
+              nullable: true
+              maxItems: 64
+              items: { $ref: '#/components/schemas/Message' }
+              description: extract/auto(messages) 必填。
+            mode:
+              type: string
+              enum: [append, auto, extract]
+              default: auto
+            kind:
+              type: string
+              default: fact
+              minLength: 1
+              maxLength: 64
+            categories:
+              type: array
+              maxItems: 10
+              items:
+                type: string
+                minLength: 1
+                maxLength: 256
+              default: []
+            source_refs:
+              type: array
+              maxItems: 32
+              items:
+                type: string
+                minLength: 1
+                maxLength: 256
+              default: []
+            artifact_refs:
+              type: array
+              maxItems: 32
+              items:
+                type: string
+                minLength: 1
+                maxLength: 256
+              default: []
+            expected_revision:
+              type: integer
+              nullable: true
+              minimum: 0
+              description: scope 级乐观锁。显式传入时不自动重试，冲突返回 409。
+
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+          maxLength: 8192
+
+    ReviseRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          required: [entry_id, text]
+          properties:
+            entry_id:
+              type: string
+              minLength: 1
+              maxLength: 64
+            text:
+              type: string
+              minLength: 1
+              maxLength: 8192
+            kind:
+              type: string
+              nullable: true
+              minLength: 1
+              maxLength: 64
+            categories:
+              type: array
+              nullable: true
+              maxItems: 10
+              items: { type: string, maxLength: 256 }
+            source_refs:
+              type: array
+              nullable: true
+              maxItems: 32
+              items: { type: string, maxLength: 256 }
+            artifact_refs:
+              type: array
+              nullable: true
+              maxItems: 32
+              items: { type: string, maxLength: 256 }
+            expected_revision:
+              type: integer
+              nullable: true
+              minimum: 0
+
+    RetireRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          required: [entry_id]
+          properties:
+            entry_id:
+              type: string
+              minLength: 1
+              maxLength: 64
+            reason:
+              type: string
+              nullable: true
+              maxLength: 512
+            expected_revision:
+              type: integer
+              nullable: true
+              minimum: 0
+
+    ReactivateRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          required: [entry_id]
+          properties:
+            entry_id:
+              type: string
+              minLength: 1
+              maxLength: 64
+            reason:
+              type: string
+              nullable: true
+              maxLength: 512
+            expected_revision:
+              type: integer
+              nullable: true
+              minimum: 0
+
+    MemoryCitation:
+      type: object
+      required: [artifact_id, entry_id, entry_version_id]
+      properties:
+        artifact_id: { type: string, minLength: 1, maxLength: 64 }
+        entry_id: { type: string, minLength: 1, maxLength: 64 }
+        entry_version_id: { type: string, minLength: 1, maxLength: 64 }
+        scope_key:
+          type: string
+          nullable: true
+          description: v3 自洽引用可携带，此时请求可不重复传顶层 scope。
+
+    ExpandRequest:
+      type: object
+      properties:
+        citation: { $ref: '#/components/schemas/MemoryCitation' }
+        tenant_id: { type: string, nullable: true }
+        user_id: { type: string, nullable: true }
+        agent_id: { type: string, nullable: true }
+        run_id: { type: string, nullable: true }
+        session_id: { type: string, nullable: true }
+      required: [citation]
+
+    RecallRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          required: [query]
+          properties:
+            query:
+              type: string
+              minLength: 1
+              maxLength: 8192
+            limit:
+              type: integer
+              default: 10
+              minimum: 1
+              maximum: 50
+            mode:
+              type: string
+              enum: [auto, semantic, keyword]
+              default: auto
+            rerank:
+              type: boolean
+              default: false
+            threshold:
+              type: number
+              nullable: true
+              minimum: 0
+              maximum: 1
+              description: 只过滤 semantic 原始相似度；keyword 模式传入返回 422。
+            explain:
+              type: boolean
+              default: false
+
+    EntryVersion:
+      type: object
+      required: [entry_id, entry_version_id, version, kind, text, entry_content_hash, created_in_revision, provenance, created_at]
+      properties:
+        entry_id: { type: string }
+        entry_version_id: { type: string }
+        version: { type: integer }
+        previous_version_id: { type: string, nullable: true }
+        kind: { type: string }
+        text: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+          default: []
+        source_refs:
+          type: array
+          items: { type: string }
+          default: []
+        artifact_refs:
+          type: array
+          items: { type: string }
+          default: []
+        entry_content_hash: { type: string }
+        created_in_revision: { type: integer }
+        provenance: { type: string }
+        created_at: { type: string, format: date-time }
+
+    RememberResult:
+      type: object
+      required: [outcome, artifact_id, revision]
+      properties:
+        outcome:
+          type: string
+          enum: [created, updated, noop]
+        artifact_id: { type: string }
+        revision: { type: integer }
+        pending_embed: { type: boolean, default: false }
+        entry:
+          oneOf:
+            - { $ref: '#/components/schemas/EntryVersion' }
+            - { type: 'null' }
+
+    RecallItem:
+      type: object
+      required: [id, memory, score, matched_by]
+      properties:
+        id: { type: string }
+        memory: { type: string }
+        score: { type: number }
+        hash: { type: string, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+        matched_by:
+          type: array
+          items:
+            type: string
+            enum: [semantic, keyword, entity, rerank, fts_sidecar, legacy]
+        stale: { type: boolean, default: false }
+        metadata: { type: object, additionalProperties: true }
+        citation:
+          oneOf:
+            - { $ref: '#/components/schemas/MemoryCitation' }
+            - { type: 'null' }
+
+    RecallResult:
+      type: object
+      required: [search_mode, storage_source, results]
+      properties:
+        search_mode:
+          type: string
+          enum: [hybrid, semantic, keyword, fts_sidecar]
+        storage_source:
+          type: string
+          enum: [primary_vdb, sql_fts]
+        degraded: { type: boolean, default: false }
+        degraded_channels:
+          type: array
+          items: { type: string }
+          default: []
+        rerank_status:
+          type: string
+          enum: [ok, fallback, disabled]
+          default: disabled
+        as_of_revision:
+          type: integer
+          nullable: true
+          description: 仅 sql_fts 兜底时返回。
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/RecallItem' }
+
+    ChangesRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          properties:
+            since_revision:
+              type: integer
+              default: 0
+              minimum: 0
+            limit:
+              type: integer
+              default: 200
+              minimum: 1
+              maximum: 1000
+            cursor:
+              type: integer
+              nullable: true
+              minimum: 0
+
+    ChangeRecord:
+      type: object
+      required: [entry_id, entry_version_id, version, event_type, created_in_revision, created_at]
+      properties:
+        entry_id: { type: string }
+        entry_version_id: { type: string }
+        version: { type: integer }
+        event_type:
+          type: string
+          enum: [created, revised, retired, reactivated]
+        kind: { type: string }
+        entry_content_hash: { type: string }
+        created_in_revision: { type: integer }
+        provenance: { type: string }
+        created_at: { type: string, format: date-time }
+        next_cursor: { type: integer, nullable: true }
+
+    ChangesResult:
+      type: object
+      required: [changes]
+      properties:
+        changes:
+          type: array
+          items: { $ref: '#/components/schemas/ChangeRecord' }
+
+    GetMemoryRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          required: [entry_id]
+          properties:
+            entry_id: { type: string, minLength: 1, maxLength: 64 }
+
+    MemoryHeadResult:
+      type: object
+      required: [entry_id, entry_version_id, state, text, entry_content_hash, revision]
+      properties:
+        entry_id: { type: string }
+        entry_version_id: { type: string }
+        artifact_id: { type: string }
+        state:
+          type: string
+          enum: [active, inactive]
+        kind: { type: string }
+        text: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+        entry_content_hash: { type: string }
+        revision: { type: integer }
+        embedding_status:
+          type: string
+          enum: [disabled, pending, ready, failed]
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PrepareContextRequest:
+      allOf:
+        - $ref: '#/components/schemas/ScopeIds'
+        - type: object
+          required: [query]
+          properties:
+            query: { type: string, minLength: 1, maxLength: 8192 }
+            budget_bytes:
+              type: integer
+              default: 8000
+              minimum: 512
+              maximum: 32768
+            mode:
+              type: string
+              enum: [auto, semantic, keyword]
+              default: auto
+
+    PrepareContextResult:
+      type: object
+      required: [schema, rendered, item_count, dropped, budget_bytes, rendered_bytes]
+      properties:
+        schema: { type: string }
+        rendered: { type: string }
+        item_count: { type: integer }
+        dropped: { type: integer }
+        budget_bytes: { type: integer }
+        rendered_bytes: { type: integer }
+        search_mode:
+          type: string
+          enum: [hybrid, semantic, keyword, fts_sidecar]
+
+    Capabilities:
+      type: object
+      properties:
+        storage:
+          type: object
+          properties:
+            mode: { type: string, enum: [only_vdb, hybrid_storage] }
+            primary_provider: { type: string }
+            sql_fallback_enabled: { type: boolean }
+        memory:
+          type: object
+          properties:
+            extraction: { type: boolean }
+            semantic_search: { type: boolean }
+            keyword_search: { type: boolean }
+            embedding_profile: { type: string, nullable: true }
+            lifecycle: { type: boolean }
+        handoff: { type: boolean }
+        review_inbox: { type: boolean }
+
+    HealthCheck:
+      type: object
+      required: [name, blocking, state]
+      properties:
+        name: { type: string }
+        blocking: { type: boolean }
+        state: { type: string, enum: [ready, unavailable] }
+
+    HealthResult:
+      type: object
+      required: [state, checks]
+      properties:
+        state:
+          type: string
+          enum: [ready, degraded, not_ready]
+        checks:
+          type: array
+          items: { $ref: '#/components/schemas/HealthCheck' }
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - revision_conflict
+            - operation_in_progress
+            - validation_error
+            - evidence_expired
+            - entry_not_found
+            - capability_not_supported
+            - primary_unavailable
+            - primary_conflict
+            - memory_published_repair_pending
+        message: { type: string }
+        request_id: { type: string }

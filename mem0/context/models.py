@@ -104,13 +104,40 @@ class ChangesRequest(ScopeParams):
 
 
 class RememberRequest(ScopeParams):
-    text: str = Field(min_length=1)
+    text: str | None = Field(default=None, min_length=1)
+    messages: list[dict] | None = Field(
+        default=None,
+        description="Conversation for mode=extract/auto (role+content dicts).",
+    )
     kind: str = Field(default=DEFAULT_KIND, min_length=1, max_length=64)
     categories: list[RefItem] = Field(default_factory=list, max_length=10)
     source_refs: list[RefItem] = Field(default_factory=list, max_length=32)
     artifact_refs: list[RefItem] = Field(default_factory=list, max_length=32)
+    metadata: Optional[dict] = None
+    expires_at: Optional[str] = Field(default=None, max_length=40)
     mode: str = Field(default="auto", pattern="^(auto|append|extract)$")
     expected_revision: Optional[int] = Field(default=None, ge=0)
+
+
+class ReviseRequest(ScopeParams):
+    """POST /v1/memory/revise (design §7.6.1): explicit revision of one entry;
+    the target entry_id is resolved server-side only."""
+
+    entry_id: str = Field(min_length=1, max_length=64)
+    text: Optional[str] = Field(default=None, min_length=1)
+    kind: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    categories: Optional[list[RefItem]] = Field(default=None, max_length=10)
+    source_refs: Optional[list[RefItem]] = Field(default=None, max_length=32)
+    artifact_refs: Optional[list[RefItem]] = Field(default=None, max_length=32)
+    metadata: Optional[dict] = None
+    expires_at: Optional[str] = Field(default=None, max_length=40)
+    expected_revision: Optional[int] = Field(default=None, ge=0)
+
+
+class GetRequest(ScopeParams):
+    """POST /v1/memory/get (design §7.6.1): point read of the current head."""
+
+    entry_id: str = Field(min_length=1, max_length=64)
 
 
 class ChangeRecordBody(BaseModel):

@@ -9,7 +9,6 @@ round-trip) covering:
 """
 
 import importlib
-import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -41,16 +40,46 @@ def _mock_memory():
     mock_instance.delete_all.return_value = {"message": "Memories deleted successfully!"}
     mock_instance.reset.return_value = None
 
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-key"}):
+    import server_state as _server_state
+
+    def _fake_build(_config):
+        # v3: bypass real ES construction — the mock adapter serves the routes
+        return MagicMock(), mock_instance
+
+    # Local sqlite app DB so auth/middleware paths never need a real database.
+    import db as _db
+    import auth as _auth_mod
+    from sqlalchemy import create_engine as _ce
+    from sqlalchemy.orm import sessionmaker as _sm
+    from sqlalchemy.pool import StaticPool
+    _engine = _ce(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    _session = _sm(bind=_engine, autoflush=False, expire_on_commit=False)
+    from models import Base as _Base
+    _Base.metadata.create_all(_engine)
+
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-key", "VECTOR_STORE_PROVIDER": "elasticsearch", "JWT_SECRET": "unit-test-secret"}):
         with patch("mem0.Memory.from_config", return_value=mock_instance):
-            yield mock_instance
+            with patch.object(_server_state, "_build_memory", _fake_build):
+                with patch.object(_db, "engine", _engine), patch.object(_db, "SessionLocal", _session), \
+                        patch.object(_auth_mod, "SessionLocal", _session):
+                    yield mock_instance
+
 
 
 def _load_app(env_overrides: dict):
-    """Reload server/main.py with the given environment and return the FastAPI app."""
+    """Reload server/main.py with the given environment and return the FastAPI app.
+    auth is reloaded first: main binds ADMIN_API_KEY/JWT_SECRET/AUTH_DISABLED at
+    import time, so without an auth reload the new environment never applies."""
     import server.main as server_main
 
     with patch.dict(os.environ, env_overrides, clear=False):
+        import auth as _auth
+
+        importlib.reload(_auth)
         importlib.reload(server_main)
     return server_main.app
 
@@ -60,11 +89,13 @@ def _load_app(env_overrides: dict):
 # ---------------------------------------------------------------------------
 
 class TestAuthDisabled:
-    """All endpoints should be freely accessible when ADMIN_API_KEY is empty."""
+    """All endpoints are freely accessible when AUTH_DISABLED=true (auth is
+    enabled by default in this build; an empty ADMIN_API_KEY alone no longer
+    disables it)."""
 
     @pytest.fixture(autouse=True)
     def _setup(self, _mock_memory):
-        self.app = _load_app({"ADMIN_API_KEY": ""})
+        self.app = _load_app({"ADMIN_API_KEY": "", "AUTH_DISABLED": "true"})
         self.client = TestClient(self.app)
         self.mock = _mock_memory
 
@@ -119,11 +150,14 @@ class TestAuthDisabled:
         assert resp.status_code == 200
 
     def test_supplying_key_still_works_when_auth_disabled(self):
-        """A client that sends X-API-Key should not be penalized when auth is off."""
-        resp = self.client.get(
-            "/memories/mem-1", headers={"X-API-Key": "some-random-key"}
-        )
+        """Clients that omit credentials pass through when auth is off; a
+        supplied but unresolvable key is still rejected (current contract)."""
+        resp = self.client.get("/memories/mem-1")
         assert resp.status_code == 200
+        rejected = self.client.get(
+            "/memories/mem-1", headers={"X-API-Key": "some-random-key-123"}
+        )
+        assert rejected.status_code == 401
 
     @pytest.mark.parametrize(
         "method,path",
@@ -184,7 +218,7 @@ class TestAuthEnabled:
 
     def test_401_includes_www_authenticate_header(self):
         resp = self.client.get("/memories/mem-1")
-        assert resp.headers.get("www-authenticate") == "ApiKey"
+        assert resp.headers.get("www-authenticate") == "Bearer"
 
     def test_near_miss_key_rejected(self):
         """Key that differs by one character should be rejected."""
@@ -335,10 +369,10 @@ class TestAuthenticatedCRUDFlow:
         assert resp.status_code == 200
         self.mock.get.assert_called_once_with("mem-1")
 
-        # 3. Read all
+        # 3. Read all (scoped listing routes through filters)
         resp = self._authed("GET", "/memories", params={"user_id": "alice"})
         assert resp.status_code == 200
-        self.mock.get_all.assert_called_once_with(user_id="alice")
+        self.mock.get_all.assert_called_once_with(filters={"user_id": "alice"}, show_expired=False)
 
         # 4. Search
         resp = self._authed("POST", "/search", json={"query": "pizza", "user_id": "alice"})
@@ -358,7 +392,7 @@ class TestAuthenticatedCRUDFlow:
         # 7. Delete single
         resp = self._authed("DELETE", "/memories/mem-1")
         assert resp.status_code == 200
-        self.mock.delete.assert_called_once_with(memory_id="mem-1")
+        self.mock.delete.assert_called_once_with(memory_id="mem-1", purge=False)
 
         # 8. Delete all
         resp = self._authed("DELETE", "/memories", params={"user_id": "alice"})
@@ -426,15 +460,21 @@ class TestAuthEdgeCases:
         assert resp.status_code == 401
 
     def test_key_env_var_not_present_at_all(self):
-        """When the env var is completely absent, auth should be disabled."""
+        """Auth is enabled by default: with the key absent entirely the
+        protected endpoints still require credentials."""
         import server.main as server_main
+        import auth as _auth
         env = os.environ.copy()
         env.pop("ADMIN_API_KEY", None)
+        env.pop("AUTH_DISABLED", None)
+        env.setdefault("JWT_SECRET", "unit-test-secret")
+        env.setdefault("VECTOR_STORE_PROVIDER", "elasticsearch")
         with patch.dict(os.environ, env, clear=True):
+            importlib.reload(_auth)
             importlib.reload(server_main)
         client = TestClient(server_main.app)
         resp = client.get("/memories/mem-1")
-        assert resp.status_code != 401
+        assert resp.status_code == 401
 
     def test_switching_from_enabled_to_disabled(self):
         """Simulates a server restart with auth toggled off."""
@@ -443,8 +483,9 @@ class TestAuthEdgeCases:
         c1 = TestClient(app1)
         assert c1.get("/memories/mem-1").status_code == 401
 
-        # Then: auth disabled
-        app2 = _load_app({"ADMIN_API_KEY": ""})
+        # Then: auth disabled (AUTH_DISABLED=true — an empty key alone no
+        # longer disables auth in this build)
+        app2 = _load_app({"ADMIN_API_KEY": "", "AUTH_DISABLED": "true"})
         c2 = TestClient(app2)
         assert c2.get("/memories/mem-1").status_code != 401
 
@@ -480,17 +521,17 @@ class TestStartupLogging:
     def _setup(self, _mock_memory):
         pass
 
-    def test_warning_when_auth_disabled(self, caplog):
-        with caplog.at_level(logging.WARNING):
-            _load_app({"ADMIN_API_KEY": ""})
-        assert any("UNSECURED" in r.message for r in caplog.records)
+    def test_warning_when_auth_disabled(self, capfd):
+        # reload re-installs root handlers, which drops caplog's handler —
+        # assert on the console stream instead
+        _load_app({"ADMIN_API_KEY": "", "AUTH_DISABLED": "true"})
+        assert "AUTH_DISABLED is enabled" in capfd.readouterr().err
 
-    def test_info_when_auth_enabled(self, caplog):
-        with caplog.at_level(logging.INFO):
-            _load_app({"ADMIN_API_KEY": "a-long-enough-secret-key"})
-        assert any("authentication enabled" in r.message for r in caplog.records)
+    def test_info_when_auth_enabled(self, capfd):
+        """A configured long key no longer emits any auth warning."""
+        _load_app({"ADMIN_API_KEY": "a-long-enough-secret-key"})
+        assert "ADMIN_API_KEY" not in capfd.readouterr().err
 
-    def test_warning_when_key_too_short(self, caplog):
-        with caplog.at_level(logging.WARNING):
-            _load_app({"ADMIN_API_KEY": "short"})
-        assert any("shorter than" in r.message for r in caplog.records)
+    def test_warning_when_key_too_short(self, capfd):
+        _load_app({"ADMIN_API_KEY": "short"})
+        assert "shorter than" in capfd.readouterr().err

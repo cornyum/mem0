@@ -1,16 +1,15 @@
-"""MCP projection (design §6.2): a whitelist of context operations exposed
-as MCP tools over the SAME in-process memory instance the REST tier uses —
-zero semantic fork, no double-counted transport metrics.
-
-Tools mirror the /v1 operationIds: remember / recall / retire / reactivate
-/ changes / expand / capture_source / prepare. Auth is enforced by the
-HTTP layer that mounts this server; MCP itself is not an authorization
-boundary (PowerContext RFC 0050 same caveat) — reviewers must control
-endpoint access.
+"""MCP projection (design §7.3): tools generated from the
+MemoryApplicationService — the SAME in-process domain entry point REST /v1
+uses, zero semantic fork. Auth is mandatory: the HTTP transport must carry
+Bearer / X-API-Key and reuses the server's verify_auth semantics
+(acceptance §12.8: no credentials ⇒ 401).
 """
 
 import logging
 from typing import Any, Dict, Optional
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +21,62 @@ except ImportError:  # optional extra
 MCP_TOOLS_ENABLED = (
     "remember",
     "recall",
+    "revise",
     "retire",
     "reactivate",
     "changes",
     "expand",
-    "capture_source",
+    "get",
     "prepare",
 )
+
+
+class McpAuthMiddleware(BaseHTTPMiddleware):
+    """Service-level MCP authentication (design §7.3): Bearer JWT or
+    X-API-Key, same resolution rules as verify_auth. AUTH-disabled
+    deployments stay open (local development only)."""
+
+    async def dispatch(self, request, call_next):
+        if request.url.path.endswith(("/docs", "/openapi.json")) or request.method == "OPTIONS":
+            return await call_next(request)
+        try:
+            import secrets
+
+            import auth as auth_mod
+            from db import SessionLocal
+
+            bearer = request.headers.get("authorization", "")
+            token = bearer[7:].strip() if bearer.lower().startswith("bearer ") else None
+            api_key = request.headers.get("x-api-key")
+            if token is None and api_key is None:
+                if auth_mod.AUTH_DISABLED:
+                    return await call_next(request)
+                return JSONResponse(
+                    {"detail": "Authentication required. Provide a Bearer token or X-API-Key header."},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            with SessionLocal() as db:
+                if token is not None:
+                    auth_mod._resolve_user_from_jwt(token, db)
+                else:
+                    if auth_mod.ADMIN_API_KEY and secrets.compare_digest(api_key, auth_mod.ADMIN_API_KEY):
+                        return await call_next(request)
+                    auth_mod._resolve_user_from_api_key(api_key, db)
+            return await call_next(request)
+        except Exception:
+            logger.warning("MCP auth rejected a request", exc_info=True)
+            return JSONResponse({"detail": "Invalid credentials"}, status_code=401)
+
+
+def _ids(user_id, agent_id, run_id, tenant_id, session_id) -> Dict[str, str]:
+    return {
+        k: v
+        for k, v in dict(
+            user_id=user_id, agent_id=agent_id, run_id=run_id, tenant_id=tenant_id, session_id=session_id
+        ).items()
+        if v
+    }
 
 
 def build_mcp_server() -> "FastMCP":
@@ -46,15 +94,20 @@ def build_mcp_server() -> "FastMCP":
         session_id: Optional[str] = None,
         kind: str = "fact",
         mode: str = "append",
+        categories: Optional[list] = None,
+        source_refs: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Explicit idempotent memory write (zero-LLM in append mode)."""
-        from server_state import get_memory_instance
+        """Idempotent memory write into the ES authority (append mode is zero-LLM)."""
+        from server_state import get_app_service
 
-        result = get_memory_instance().remember(
-            text, mode=mode, kind=kind,
-            **{k: v for k, v in dict(user_id=user_id, agent_id=agent_id, run_id=run_id, tenant_id=tenant_id, session_id=session_id).items() if v},
+        return get_app_service().remember(
+            text,
+            mode=mode,
+            kind=kind,
+            categories=categories or [],
+            source_refs=source_refs or [],
+            **_ids(user_id, agent_id, run_id, tenant_id, session_id),
         )
-        return result.model_dump(mode="json")
 
     @mcp.tool
     def recall(
@@ -66,67 +119,86 @@ def build_mcp_server() -> "FastMCP":
         session_id: Optional[str] = None,
         limit: int = 10,
         mode: str = "auto",
+        rerank: bool = False,
     ) -> Dict[str, Any]:
-        """Channel-transparent retrieval with freshness checks."""
-        from server_state import get_memory_instance
+        """Channel-transparent retrieval (auto/semantic/keyword, RRF, matched_by)."""
+        from server_state import get_app_service
 
-        return get_memory_instance().recall(
-            query, limit=limit, mode=mode,
-            **{k: v for k, v in dict(user_id=user_id, agent_id=agent_id, run_id=run_id, tenant_id=tenant_id, session_id=session_id).items() if v},
+        return get_app_service().recall(
+            query, limit=limit, mode=mode, rerank=rerank,
+            **_ids(user_id, agent_id, run_id, tenant_id, session_id),
         )
+
+    @mcp.tool
+    def revise(
+        entry_id: str,
+        text: str,
+        user_id: str,
+        kind: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Explicit revision of one entry (creates a new immutable version)."""
+        from server_state import get_app_service
+
+        result = get_app_service().revise(entry_id, text=text, kind=kind, user_id=user_id)
+        return result.model_dump(mode="json")
 
     @mcp.tool
     def retire(entry_id: str, user_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
         """Logically deactivate an entry (history stays queryable)."""
-        from server_state import get_memory_instance
+        from server_state import get_app_service
 
-        result = get_memory_instance().retire(entry_id, reason=reason, user_id=user_id)
+        result = get_app_service().retire(entry_id, reason=reason, user_id=user_id)
         return result.model_dump(mode="json")
 
     @mcp.tool
     def reactivate(entry_id: str, user_id: str) -> Dict[str, Any]:
-        from server_state import get_memory_instance
+        """Reactivate a retired entry."""
+        from server_state import get_app_service
 
-        result = get_memory_instance().reactivate(entry_id, user_id=user_id)
+        result = get_app_service().reactivate(entry_id, user_id=user_id)
         return result.model_dump(mode="json")
 
     @mcp.tool
     def changes(user_id: str, since_revision: int = 0, limit: int = 200) -> Dict[str, Any]:
-        """Version-chain tail for one scope (paginate via next_cursor)."""
-        from server_state import get_memory_instance
+        """Revision-cursor change feed for one scope (retire/reactivate included)."""
+        from server_state import get_app_service
 
-        records = get_memory_instance().changes(user_id=user_id, since_revision=since_revision, limit=limit)
+        records = get_app_service().changes(user_id=user_id, since_revision=since_revision, limit=limit)
         return {"changes": [r.model_dump(mode="json") for r in records]}
 
     @mcp.tool
     def expand(entry_id: str, entry_version_id: str, user_id: str) -> Dict[str, Any]:
         """Version-exact read with hash re-verification."""
-        from mem0.context.scope import ScopeIdentity
-        from server_state import get_memory_instance
+        from mem0.context.models import MemoryCitation
+        from server_state import get_app_service
 
-        memory = get_memory_instance()
-        artifact_id = memory.ctx_store.get_artifact_id(ScopeIdentity(user_id=user_id))
-        body = memory.expand(
-            memory._citation_from_dict(
-                {"artifact_id": artifact_id, "entry_id": entry_id, "entry_version_id": entry_version_id}
+        from mem0.context.scope import ScopeIdentity
+
+        service = get_app_service()
+        scope_doc = service.store.get_scope(ScopeIdentity(user_id=user_id).scope_key)
+        body = service.expand(
+            MemoryCitation(
+                artifact_id=scope_doc.artifact_id,
+                entry_id=entry_id,
+                entry_version_id=entry_version_id,
             ),
             user_id=user_id,
         )
         return body.model_dump(mode="json")
 
     @mcp.tool
-    def capture_source(content: str, user_id: str, source_type: str = "content") -> Dict[str, Any]:
-        """Append a raw-fact Source to the per-scope journal."""
-        from server_state import get_memory_instance
+    def get(entry_id: str, user_id: str) -> Dict[str, Any]:
+        """Point read of the current head for one entry."""
+        from server_state import get_app_service
 
-        return get_memory_instance().capture_source(content, source_type=source_type, user_id=user_id)
+        return get_app_service().get(entry_id, user_id=user_id)
 
     @mcp.tool
     def prepare(query: str, user_id: str, budget_bytes: int = 8000) -> Dict[str, Any]:
         """PreparedContext: trust-enveloped, byte-budgeted prompt assembly."""
-        from server_state import get_memory_instance
+        from server_state import get_app_service
 
-        return get_memory_instance().prepare_context(query, budget_bytes=budget_bytes, user_id=user_id)
+        return get_app_service().prepare_context(query, budget_bytes=budget_bytes, user_id=user_id)
 
     return mcp
 
@@ -135,11 +207,11 @@ def mount_mcp(app):
     """Mount the MCP streamable-HTTP endpoint at /mcp when fastmcp exists.
 
     NOTE: fastmcp's session manager initializes in the app lifespan, and
-    Starlette does NOT run lifespans of mounted sub-apps — mounting under
-    the main server leaves the transport unusable. Use
-    :func:`create_standalone_app` (its own process/lifespan, e.g. the
-    compose `mem0-mcp` service) for a working endpoint; this mount is kept
-    only for embeddings where the host app adopts the lifespan."""
+    Starlette does NOT run lifespans of mounted sub-apps — mounting under the
+    main server leaves the transport unusable. Use :func:`create_standalone_app`
+    (its own process/lifespan, e.g. the compose mem0-mcp service) for a working
+    endpoint; this mount is kept only for embeddings where the host app adopts
+    the lifespan."""
     if FastMCP is None:
         logger.info("fastmcp not installed; MCP projection disabled (pip install fastmcp)")
         return None
@@ -156,7 +228,8 @@ def mount_mcp(app):
 def create_standalone_app():
     """Standalone MCP service app (own lifespan — the supported deployment:
     `uvicorn mcp_standalone:app` / the compose mem0-mcp service). Same
-    whitelist tools, same in-process semantics."""
+    whitelist tools, same in-process semantics, service-level auth enforced
+    on every request (design §7.3)."""
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI
@@ -170,12 +243,13 @@ def create_standalone_app():
     async def lifespan(app):
         # Importing the REST module runs initialize_state(DEFAULT_CONFIG) —
         # the single env-driven construction path — giving this process the
-        # same configured memory instance (design §8.2 single-factory rule).
+        # same configured service (design §8.2 single-factory rule).
         import main  # noqa: F401
 
         async with http_app.lifespan(http_app):
             yield
 
     app = FastAPI(title="Agentar Memory MCP", lifespan=lifespan)
+    app.add_middleware(McpAuthMiddleware)
     app.mount("/", http_app)
     return app
