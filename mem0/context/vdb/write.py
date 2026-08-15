@@ -156,6 +156,7 @@ class WriteCoordinator:
             expires_at=expires_at,
             expected_revision=expected_revision,
             provenance=provenance,
+            previous_entry_version_id=None,
         )
 
     # -- revise --------------------------------------------------------------------
@@ -274,6 +275,7 @@ class WriteCoordinator:
             metadata=metadata if metadata is not None else head.get("metadata"),
             expires_at=expires_at if expires_at is not None else head.get("expires_at"),
             expected_revision=expected_revision,
+            previous_entry_version_id=head.get("entry_version_id"),
         )
 
     # -- retire / reactivate / purge -------------------------------------------------
@@ -328,9 +330,18 @@ class WriteCoordinator:
         outcome = self._state_flip(
             scope, scope_doc, head, EVENT_PURGED, "purged", reason, expected_revision, dedup_key=dedup_key
         )
-        self._retry_derived(lambda: self.store.delete_head(scope.scope_key, entry_id))
-        self._retry_derived(lambda: self.store.delete_entry_versions(scope.scope_key, entry_id))
-        self._refresh()
+        try:
+            self._retry_derived(lambda: self.store.delete_head(scope.scope_key, entry_id))
+            self._retry_derived(lambda: self.store.delete_entry_versions(scope.scope_key, entry_id))
+            self._refresh()
+        except Exception as exc:
+            logger.warning("Purge deletes pending for %s: %s", entry_id, exc)
+            raise PublishedRepairPendingError(
+                "Memory purged; physical deletes are being repaired — retry the same command",
+                scope_key=scope.scope_key,
+                revision=outcome.revision,
+                entry_id=entry_id,
+            ) from exc
         return outcome
 
     # -- claim acquisition --------------------------------------------------------
@@ -410,10 +421,17 @@ class WriteCoordinator:
         entry_id = claim.get("entry_id")
         entry_version_id = claim.get("entry_version_id")
         revision = int(claim.get("scope_revision", 0))
-        if not (
+        # the claim's revision is a prediction; CAS retries may have published
+        # higher — resolve from the version doc (review #5)
+        version_probe = self.store.find_version(entry_version_id) if entry_version_id else None
+        if version_probe is not None:
+            revision = int(version_probe.get("scope_revision", revision))
+        head_probe = self.store.get_head(scope.scope_key, entry_id)
+        completed_here = (
             scope_doc.published_revision >= revision
             and scope_doc.last_entry_version_id == entry_version_id
-        ):
+        ) or (head_probe is not None and head_probe.get("entry_version_id") == entry_version_id)
+        if not completed_here:
             return None
         event = self.store.get_event(scope.scope_key, revision)
         if event is None:
@@ -484,9 +502,14 @@ class WriteCoordinator:
             raise DedupConflictError(
                 f"Same content already active in entry {existing.get('entry_id')}"
             )
-        if existing.get("status") == "prepared" and existing.get("entry_id") == head["entry_id"]:
-            return  # our own in-flight claim
-        # released or foreign expired claim: take it over deterministically
+        if existing.get("status") == "prepared":
+            if existing.get("entry_id") == head["entry_id"]:
+                return  # our own in-flight claim
+            if not self._claim_expired(existing):
+                raise OperationInProgressError(
+                    "Another writer holds the dedup claim for this content; retry shortly"
+                )
+        # released or expired claim: take it over deterministically
         self._reclaim(scope, dedup_key, head["entry_id"], head.get("entry_version_id"), scope_doc)
 
     # -- publish ----------------------------------------------------------------
@@ -512,6 +535,7 @@ class WriteCoordinator:
         expires_at: Optional[str] = None,
         expected_revision: Optional[int] = None,
         provenance: str = "api",
+        previous_entry_version_id: Optional[str] = None,
     ) -> WriteOutcome:
         version_doc = {
             "scope_key": scope.scope_key,
@@ -530,6 +554,9 @@ class WriteCoordinator:
             "legacy_ids": [entry_id],
             "created_at": utcnow(),
         }
+        # freshness anchor (NOT persisted — mapping is strict): the head
+        # version this command was planned against
+        planned_against_vid = previous_entry_version_id
 
         last_error: Optional[Exception] = None
         for _ in range(CAS_RETRIES):
@@ -537,12 +564,24 @@ class WriteCoordinator:
             if baseline is None:
                 raise PrimaryUnavailableError("Scope document vanished mid-publish")
             if expected_revision is not None and expected_revision != baseline.published_revision:
+                self._release_own_claim(scope, dedup_key, entry_id)
                 raise RevisionConflictError(
                     scope_key=scope.scope_key,
                     artifact_id=baseline.artifact_id,
                     expected_revision=expected_revision,
                     current_revision=baseline.published_revision,
                 )
+            if event_type == EVENT_REVISED:
+                # A conflict may hide a concurrent revise of the same entry:
+                # the deterministic version _id must not be reused to overwrite
+                # an already-published immutable version (design §4.1).
+                fresh_head = self.store.get_head(scope.scope_key, entry_id)
+                if (
+                    fresh_head is not None
+                    and fresh_head.get("entry_version_id") != planned_against_vid
+                    and int(fresh_head.get("version", 0)) >= version_doc["version"]
+                ):
+                    version_doc["version"] = int(fresh_head.get("version", 0)) + 1
             new_revision = baseline.published_revision + 1
             version_doc["scope_revision"] = new_revision
             self.store.put_version(version_doc)
@@ -579,6 +618,7 @@ class WriteCoordinator:
                 metadata=metadata,
                 expires_at=expires_at,
             )
+        self._release_own_claim(scope, dedup_key, entry_id)
         raise RevisionConflictError(
             scope_key=scope.scope_key,
             artifact_id=scope_doc.artifact_id,
@@ -647,11 +687,7 @@ class WriteCoordinator:
         try:
             self._retry_derived(lambda: self.store.put_head(head))
             self._retry_derived(lambda: self.store.put_event(event))
-            self._retry_derived(
-                lambda: self.store.set_dedup_status(
-                    scope.scope_key, dedup_key, ACTIVE, entry_id=entry_id, entry_version_id=entry_version_id
-                )
-            )
+            self._fence_claim_or_skip(scope.scope_key, dedup_key, entry_id, entry_version_id)
             if old_dedup_key and old_dedup_key != dedup_key:
                 self._retry_derived(
                     lambda: self.store.set_dedup_status(scope.scope_key, old_dedup_key, "released")
@@ -696,11 +732,26 @@ class WriteCoordinator:
         *,
         dedup_key: Optional[str] = None,
     ) -> WriteOutcome:
-        """retire/reactivate/purge: no version write; CAS then head/event/dedup."""
+        """retire/reactivate/purge: no version write; CAS then head/event/dedup.
+
+        The head is re-read on every CAS attempt: a conflict may mean another
+        writer revised the entry, and publishing the stale snapshot would
+        silently revert the published revision."""
         entry_id = head["entry_id"]
         entry_version_id = head.get("entry_version_id")
         last_error: Optional[Exception] = None
         for _ in range(CAS_RETRIES):
+            fresh_head = self.store.get_head(scope.scope_key, entry_id)
+            if fresh_head is None:
+                raise EntryNotFoundError(f"Entry {entry_id} not found in scope")
+            if fresh_head.get("entry_version_id") != entry_version_id:
+                # the entry was concurrently revised — flip the LATEST state
+                head = fresh_head
+                entry_version_id = fresh_head.get("entry_version_id")
+                if event_type == EVENT_RETIRED and fresh_head.get("state") != ACTIVE:
+                    return self._noop_state(scope, scope_doc, fresh_head, INACTIVE)
+                if event_type == EVENT_REACTIVATED and fresh_head.get("state") == ACTIVE:
+                    return self._noop_state(scope, scope_doc, fresh_head, ACTIVE)
             baseline = self.store.get_scope(scope.scope_key)
             if baseline is None:
                 raise PrimaryUnavailableError("Scope document vanished mid-publish")
@@ -796,6 +847,8 @@ class WriteCoordinator:
                 content_hash=head.get("content_hash"),
                 state_after=state_after,
             )
+        if dedup_key:
+            self._release_own_claim(scope, dedup_key, entry_id)
         raise RevisionConflictError(
             scope_key=scope.scope_key,
             artifact_id=scope_doc.artifact_id,
@@ -841,6 +894,38 @@ class WriteCoordinator:
         outcome = self._noop_from_head(scope, scope_doc, head)
         outcome.state_after = state
         return outcome
+
+
+    def _release_own_claim(self, scope: ScopeIdentity, dedup_key: str, entry_id: str) -> None:
+        """Definitive failure after claiming: release the claim when it still
+        points at us so an immediate retry is not blocked for the full
+        prepared TTL (design §5.2.6 retry-converges contract)."""
+        try:
+            claim = self.store.get_dedup(scope.scope_key, dedup_key)
+            if claim is not None and claim.get("status") == "prepared" and claim.get("entry_id") == entry_id:
+                self.store.set_dedup_status(scope.scope_key, dedup_key, "released")
+        except Exception:
+            logger.debug("claim release on failure skipped", exc_info=True)
+
+    def _fence_claim_or_skip(self, scope_key: str, dedup_key: str, entry_id: str, entry_version_id: str) -> None:
+        """Activate the claim only when it still belongs to this writer; a
+        takeover past the TTL must not have its ACTIVE flag overwritten by
+        the fenced-out original (review #8)."""
+        claim = self.store.get_dedup(scope_key, dedup_key)
+        if claim is None:
+            return
+        if claim.get("status") == "active":
+            return
+        if claim.get("entry_version_id") != entry_version_id and claim.get("entry_id") != entry_id:
+            logger.warning(
+                "dedup claim %s was taken over before activation; leaving it untouched", dedup_key[:12]
+            )
+            return
+        self._retry_derived(
+            lambda: self.store.set_dedup_status(
+                scope_key, dedup_key, ACTIVE, entry_id=entry_id, entry_version_id=entry_version_id
+            )
+        )
 
     def _embed(self, text: str):
         if self.embedder is None:

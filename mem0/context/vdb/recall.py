@@ -100,7 +100,7 @@ class RecallCoordinator:
         semantic_hits: List[Dict[str, Any]] = []
         keyword_hits: List[Dict[str, Any]] = []
         degraded_channels: List[str] = []
-        es_failure: Optional[Exception] = None
+        es_failures: List[Exception] = []
 
         # -- semantic channel --------------------------------------------------
         semantic_wanted = mode != "keyword"
@@ -124,7 +124,7 @@ class RecallCoordinator:
                 except Exception as exc:
                     if mode == "semantic":
                         raise  # semantic never falls back (design §6.1)
-                    es_failure = exc
+                    es_failures.append(exc)
                     degraded_channels.append("semantic")
 
         # -- keyword channel ---------------------------------------------------
@@ -140,19 +140,23 @@ class RecallCoordinator:
                 )
                 keyword_ran = True
             except Exception as exc:
-                es_failure = exc
+                es_failures.append(exc)
                 degraded_channels.append("keyword")
 
         # -- availability contract (§6.1 / acceptance §12.5-6) ------------------
         if not semantic_ran and not keyword_ran:
-            cls = _error_class(es_failure)
-            if self.fts_fallback is not None and es_failure is not None:
-                if cls in FALLBACK_ELIGIBLE_CLASSES:
-                    return self._sql_fts_fallback(
-                        query, identity_filters=identity_filters, limit=limit
-                    )
+            # Fallback eligibility requires EVERY observed failure to be an
+            # outage class — one 400/401-class failure means a config error the
+            # sidecar must not paper over (design §6.3, review #11)
+            classes = [_error_class(exc) for exc in es_failures] or [ES_UNKNOWN_LABEL]
+            all_eligible = bool(es_failures) and all(c in FALLBACK_ELIGIBLE_CLASSES for c in classes)
+            if self.fts_fallback is not None and all_eligible:
+                return self._sql_fts_fallback(
+                    query, identity_filters=identity_filters, limit=limit
+                )
+            cls = classes[0] if len(classes) == 1 else ",".join(classes)
             raise PrimaryUnavailableError(
-                f"No recall channel available (es_error={cls})", error_class=cls
+                f"No recall channel available (es_error={cls})", error_class=classes[0]
             )
 
         if mode == "semantic":

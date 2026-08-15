@@ -25,6 +25,7 @@ from mem0.context.scope import SCOPE_FIELDS
 from mem0.context.vdb.errors import (
     ES_BAD_REQUEST,
     ES_CONFLICT,
+    ES_NOT_FOUND,
     ES_THROTTLED,
     ES_TIMEOUT,
     ES_UNAVAILABLE,
@@ -131,7 +132,9 @@ class ElasticsearchMemoryStore:
         for family in FAMILIES:
             index_name = self._index_name(family)
             alias = self.alias(family)
-            if not self.client.indices.exists_alias(name=alias, index=index_name):
+            if not self.client.indices.exists_alias(name=alias):
+                # guard on the alias alone: after a v2 alias switch a restart
+                # must not re-bind the v1 index behind the same alias
                 mappings = self._mappings(family)
                 if not self.client.indices.exists(index=index_name):
                     self.client.indices.create(
@@ -425,6 +428,18 @@ class ElasticsearchMemoryStore:
         )
         return [hit["_source"] for hit in resp["hits"]["hits"]]
 
+    def delete_version_doc(self, scope_key: str, entry_id: str, version: int) -> None:
+        """Delete exactly one version document (orphan sweep unit, §5.4.4)."""
+        try:
+            self.client.delete(
+                index=self.alias("version"),
+                id=version_doc_id(scope_key, entry_id, version),
+                routing=scope_key,
+            )
+        except Exception as exc:
+            if classify_elasticsearch_error(exc) != ES_NOT_FOUND:
+                raise
+
     def delete_entry_versions(self, scope_key: str, entry_id: str) -> int:
         return self._delete_by_query(
             "version",
@@ -504,21 +519,50 @@ class ElasticsearchMemoryStore:
             routing=scope_key,
         )
 
-    def scan_orphan_versions(self, *, limit: int = 500) -> List[dict]:
-        """Versions whose scope_revision exceeds the scope watermark (§5.4.4)."""
+    def set_head_vector_if_unchanged(
+        self, scope_key: str, entry_id: str, expected_version_id: Optional[str], vector: List[float]
+    ) -> bool:
+        """Vector completion fenced on the head's entry_version_id: a revise
+        that landed while we embedded must not receive the stale vector with
+        embedding_status=ready (permanent semantic corruption)."""
+        head = self.get_head(scope_key, entry_id)
+        if head is None:
+            return False
+        if expected_version_id and head.get("entry_version_id") != expected_version_id:
+            return False
+        if head.get("embedding_status") == "ready":
+            return True
+        self.set_head_vector(scope_key, entry_id, vector)
+        return True
+
+    def scan_orphan_versions(self, *, limit: int = 500, older_than_iso: Optional[str] = None) -> List[dict]:
+        """Versions whose scope_revision exceeds the scope watermark (§5.4.4).
+
+        ``older_than_iso`` adds a grace window: versions written recently may
+        belong to publishes that are between put_version and the scope CAS —
+        sweeping them would destroy live data."""
+        from datetime import datetime, timedelta, timezone
+
+        if older_than_iso is None:
+            older_than_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         scopes = {}
         resp = self._search(
-            "version", {"size": limit, "query": {"match_all": {}}, "sort": [{"scope_revision": {"order": "desc"}}]}
+            "version",
+            {
+                "size": limit,
+                "query": {"range": {"created_at": {"lt": older_than_iso}}},
+                "sort": [{"scope_revision": {"order": "desc"}}],
+            },
         )
         orphans = []
         for hit in resp["hits"]["hits"]:
-            src = hit["_source"]
-            scope_key = src["scope_key"]
+            src_doc = hit["_source"]
+            scope_key = src_doc["scope_key"]
             if scope_key not in scopes:
                 scope = self.get_scope(scope_key)
                 scopes[scope_key] = scope.published_revision if scope else -1
-            if int(src.get("scope_revision", 0)) > scopes[scope_key]:
-                orphans.append(src)
+            if int(src_doc.get("scope_revision", 0)) > scopes[scope_key]:
+                orphans.append(src_doc)
         return orphans
 
     # -- event -----------------------------------------------------------------
@@ -748,8 +792,12 @@ class ElasticsearchMemoryStore:
     def _get_doc(self, family: str, doc_id: str, routing: str) -> Optional[dict]:
         try:
             resp = self.client.get(index=self.alias(family), id=doc_id, routing=routing)
-        except Exception:
-            return None
+        except Exception as exc:
+            if classify_elasticsearch_error(exc) == ES_NOT_FOUND:
+                return None
+            # Transient/auth errors must NOT be mistaken for "document absent":
+            # callers use None to drive claim takeover and entry-404 decisions.
+            raise
         return resp["_source"]
 
     def _delete_by_query(self, family: str, query: Dict[str, Any]) -> int:

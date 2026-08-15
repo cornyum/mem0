@@ -10,7 +10,7 @@ pending heads eventually join the semantic channel (§6.4).
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict
+from typing import Dict, Optional
 
 from mem0.context.vdb.es_store import ElasticsearchMemoryStore, utcnow
 from mem0.context.vdb.write import (
@@ -60,15 +60,27 @@ class RecoveryReconciler:
                 counts["prepared_released"] += 1
                 continue
             claim_revision = int(claim.get("scope_revision", 0))
+            # the claim records the PREDICTED revision; CAS retries may have
+            # landed the publish higher — resolve the actual revision from the
+            # version doc when it exists (review #5)
+            actual_revision = claim_revision
+            version_doc = self.store.find_version(claim.get("entry_version_id")) if claim.get("entry_version_id") else None
+            if version_doc is not None:
+                actual_revision = int(version_doc.get("scope_revision", claim_revision))
+
             published_here = (
-                scope.published_revision >= claim_revision
+                scope.published_revision >= actual_revision
                 and scope.last_entry_version_id == claim.get("entry_version_id")
+            ) or (
+                # publish completed but a later entry published afterwards:
+                # the claim's entry is live, only the dedup write was lost
+                self._head_matches_claim(scope_key, claim)
             )
             if published_here:
-                if self._complete_publish(scope_key, scope, claim):
+                if self._complete_publish(scope_key, scope, claim, actual_revision=actual_revision):
                     counts["prepared_completed"] += 1
                 continue
-            if scope.published_revision >= claim_revision:
+            if scope.published_revision >= actual_revision:
                 # published past the claim without matching it: the claim lost
                 # the race — release so future writers can retry (§5.4.2).
                 self.store.set_dedup_status(scope_key, claim["dedup_key"], "released")
@@ -78,9 +90,16 @@ class RecoveryReconciler:
             self.store.set_dedup_status(scope_key, claim["dedup_key"], "released")
             counts["prepared_released"] += 1
 
-    def _complete_publish(self, scope_key: str, scope, claim: dict) -> bool:
+
+    def _head_matches_claim(self, scope_key: str, claim: dict) -> bool:
+        """The claim's own entry may already be live even when the scope's
+        last_* moved on — completing beats releasing (review #6)."""
+        head = self.store.get_head(scope_key, claim.get("entry_id"))
+        return head is not None and head.get("entry_version_id") == claim.get("entry_version_id")
+
+    def _complete_publish(self, scope_key: str, scope, claim: dict, *, actual_revision: Optional[int] = None) -> bool:
         entry_id = claim.get("entry_id")
-        revision = int(claim.get("scope_revision", 0))
+        revision = int(actual_revision if actual_revision is not None else claim.get("scope_revision", 0))
         event = self.store.get_event(scope_key, revision)
         if event is None:
             version_doc = self.store.find_version(claim.get("entry_version_id"))
@@ -155,40 +174,72 @@ class RecoveryReconciler:
                 continue
             event = self.store.get_event(scope.scope_key, revision)
             head = self.store.get_head(scope.scope_key, scope.last_entry_id)
+            last_type = scope.last_event_type or EVENT_CREATED
+            # state derived from the watermark event, never from a possibly
+            # stale head (review #4)
+            state_after = {"retired": "inactive", "purged": "purged"}.get(last_type, ACTIVE)
+
             if event is None:
                 version_doc = self.store.find_version(scope.last_entry_version_id)
                 event = {
                     "scope_key": scope.scope_key,
                     "scope_revision": revision,
-                    "event_type": scope.last_event_type or EVENT_CREATED,
+                    "event_type": last_type,
                     "entry_id": scope.last_entry_id,
                     "entry_version_id": scope.last_entry_version_id,
                     "version": int((version_doc or {}).get("version", 0) or 0),
                     "kind": (version_doc or head or {}).get("kind"),
                     "provenance": (version_doc or {}).get("provenance") or "api",
                     "content_hash": (version_doc or head or {}).get("content_hash"),
-                    "state_after": (head or {}).get("state") or ACTIVE,
+                    "state_after": state_after,
                     "created_at": utcnow(),
                 }
                 self.store.put_event(event)
                 counts["event_rebuilt"] += 1
-            if head is None and scope.last_event_type in (
-                EVENT_CREATED,
-                EVENT_REVISED,
-                EVENT_REACTIVATED,
-            ):
+
+            head_matches = head is not None and (
+                head.get("entry_version_id") == scope.last_entry_version_id
+                or head.get("scope_revision") == revision
+            )
+            if last_type == "purged":
+                # watermark says purged: physical deletes must complete (review #10)
+                if head is not None:
+                    self.store.delete_head(scope.scope_key, scope.last_entry_id)
+                    counts["purged_heads_deleted"] = counts.get("purged_heads_deleted", 0) + 1
+                self.store.delete_entry_versions(scope.scope_key, scope.last_entry_id)
+                continue
+            if head is None or not head_matches:
+                # missing OR stale (a revise whose head write was lost): rebuild
+                # from the published version so recallable state equals the
+                # watermark (review #4)
                 version_doc = self.store.find_version(scope.last_entry_version_id)
+                if version_doc is None and head is not None:
+                    continue  # nothing better to rebuild from
                 if version_doc is not None:
                     rebuilt = self._head_from_version(scope, version_doc, event or {})
+                    if state_after == "inactive":
+                        rebuilt["state"] = "inactive"
                     self.store.put_head(rebuilt)
                     counts["head_rebuilt"] += 1
 
     # -- step 3: orphan sweep (§5.4.4) --------------------------------------------
 
     def _sweep_orphan_versions(self, counts: Dict[str, int], *, limit: int) -> None:
-        orphans = self.store.scan_orphan_versions(limit=limit)
+        # only versions older than the grace window are eligible: fresh ones
+        # may belong to publishes between put_version and the scope CAS
+        orphans = self.store.scan_orphan_versions(
+            limit=limit, older_than_iso=(datetime.now(timezone.utc) - timedelta(seconds=self.prepared_ttl_seconds)).isoformat()
+        )
         for version_doc in orphans:
-            self.store.delete_entry_versions(version_doc["scope_key"], version_doc["entry_id"])
+            scope = self.store.get_scope(version_doc["scope_key"])
+            watermark = scope.published_revision if scope else -1
+            if int(version_doc.get("scope_revision", 0)) <= watermark:
+                continue  # the publish landed between scan and delete
+            # delete the single orphan document, never the entry's published
+            # history (review #1)
+            self.store.delete_version_doc(
+                version_doc["scope_key"], version_doc["entry_id"], int(version_doc.get("version", 0))
+            )
             counts["orphan_versions_deleted"] += 1
 
 
@@ -209,7 +260,12 @@ class EmbeddingReconciler:
         for head in heads:
             try:
                 vector = self.embedder.embed(head.get("text") or "", "memory")
-                self.store.set_head_vector(head["scope_key"], head["entry_id"], vector)
+                # conditional write: if the head was revised while we embedded,
+                # stamping the stale vector as ready would corrupt the semantic
+                # channel permanently (review #9)
+                self.store.set_head_vector_if_unchanged(
+                    head["scope_key"], head["entry_id"], head.get("entry_version_id"), vector
+                )
                 embedded += 1
             except Exception as exc:
                 logger.warning(

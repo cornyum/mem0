@@ -6,6 +6,8 @@ and the HYBRID sidecar replay — the acceptance invariants of §12 that do not
 need a live cluster.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 import sqlalchemy as sa
 
@@ -205,7 +207,15 @@ def test_concurrent_same_content_second_writer_noop(store):
     thread.start()
     result = other.remember("事实A", user_id="u1")["results"][0]
     thread.join()
-    assert result["outcome"] == "noop"
+    # Convergence contract (§5.2.6): the waiter either observes the settled
+    # active claim (noop) or idempotently completes the prepared publish —
+    # both MUST resolve to the SAME entry with no duplicate creation.
+    first_entry = store.list_heads({"user_id": "u1"})
+    assert len(first_entry) == 1
+    assert result["outcome"] in ("created", "noop")
+    if result.get("entry"):
+        assert result["entry"]["entry_id"] == first_entry[0]["entry_id"]
+    assert other.remember("事实A", user_id="u1")["results"][0]["outcome"] == "noop"
 
 
 def test_prepared_claim_unrecoverable_returns_409(store):
@@ -619,3 +629,204 @@ def test_recall_falls_back_to_sidecar_when_es_down(sqlite_engine, store):
     assert out["degraded"] is True
     assert out["as_of_revision"] == 1
     assert out["results"] and out["results"][0]["matched_by"] == ["fts_sidecar"]
+
+
+# -- review-fix regressions: concurrency & recovery edge cases ------------------
+
+
+def test_retire_after_concurrent_revise_flips_latest_state(service, store):
+    """Review #2: a retire snapshotted before a concurrent revise must flip
+    the LATEST head, never resurrect the stale version."""
+    first = service.remember("初版", user_id="u1")["results"][0]
+    entry_id = first["entry"]["entry_id"]
+    scope_key = ScopeIdentity(user_id="u1").scope_key
+
+    stale_head = dict(store.get_head(scope_key, entry_id))  # snapshot v1
+    service.revise(entry_id, text="并发修订版", user_id="u1")  # publishes v2
+    # force the retire to run with the stale snapshot by monkeypatching the
+    # first head read inside the flip path
+    real_get_head = store.get_head
+    calls = {"n": 0}
+
+    def flip_first_then_real(scope_key_, entry_id_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return dict(stale_head)
+        return real_get_head(scope_key_, entry_id_)
+
+    store.get_head = flip_first_then_real
+    try:
+        service.retire(entry_id, user_id="u1")
+    finally:
+        store.get_head = real_get_head
+
+    head = store.get_head(scope_key, entry_id)
+    assert head["state"] == "inactive"
+    assert head["text"] == "并发修订版"  # v2 content, NOT the stale v1
+    events = store.list_events(scope_key)
+    assert events[-1]["event_type"] == "retired"
+    assert events[-1]["entry_version_id"] == head["entry_version_id"]
+
+
+def test_concurrent_revises_keep_both_versions(service, store):
+    """Review #3: two revises racing on the same entry must produce distinct
+    immutable version docs — expand() stays valid for both."""
+    first = service.remember("基础", user_id="u1")["results"][0]
+    entry_id = first["entry"]["entry_id"]
+    scope_key = ScopeIdentity(user_id="u1").scope_key
+
+    r1 = service.revise(entry_id, text="修订甲", user_id="u1")
+    head_after_first = store.get_head(scope_key, entry_id)
+    vid_first = head_after_first["entry_version_id"]
+
+    # second writer planned against the PRE-revise head but loses the CAS
+    # once — its retry must recompute the version number, not overwrite v2
+    r2 = service.revise(entry_id, text="修订乙", user_id="u1")
+    assert r2.entry.version == 3
+
+    versions = store.list_versions(scope_key, entry_id)
+    assert [v["version"] for v in versions] == [1, 2, 3]
+    texts = {v["version"]: v["text"] for v in versions}
+    assert texts[2] == "修订甲" and texts[3] == "修订乙"
+    # the first revise's published version is still expandable
+    from mem0.context.models import MemoryCitation
+
+    body = service.expand(
+        MemoryCitation(
+            artifact_id=r1.artifact_id, entry_id=entry_id, entry_version_id=vid_first
+        ),
+        user_id="u1",
+    )
+    assert body.text == "修订甲"
+
+
+def test_orphan_sweep_never_deletes_published_versions(service, store):
+    """Review #1: a fresh unpublished version (between put_version and CAS)
+    must survive the sweep thanks to the grace window."""
+    first = service.remember("已发布", user_id="u1")["results"][0]
+    scope_key = ScopeIdentity(user_id="u1").scope_key
+    # synthesize an in-flight version doc (scope_revision = current+1)
+    store.put_version(
+        {
+            "scope_key": scope_key,
+            "user_id": "u1",
+            "entry_id": first["entry"]["entry_id"],
+            "entry_version_id": "inflight-vid",
+            "version": 2,
+            "kind": "fact",
+            "content_hash": "x" * 64,
+            "text": "在途版本",
+            "source_refs": [],
+            "artifact_refs": [],
+            "categories": [],
+            "scope_revision": 99,
+            "provenance": "api",
+            "legacy_ids": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),  # fresh: inside the grace window
+        }
+    )
+    counts = service.reconcile()
+    assert counts["orphan_versions_deleted"] == 0  # inside the grace window
+    versions = store.list_versions(scope_key, first["entry"]["entry_id"])
+    assert len(versions) == 2  # published v1 AND the in-flight v2 survive
+
+
+def test_reconciler_repairs_stale_head_after_lost_revise_write(service, store):
+    """Review #4: a revise whose head write was lost leaves an OLD head —
+    the reconciler must rebuild it to match the scope watermark."""
+    first = service.remember("旧内容", user_id="u1")["results"][0]
+    entry_id = first["entry"]["entry_id"]
+    scope_key = ScopeIdentity(user_id="u1").scope_key
+    service.revise(entry_id, text="新内容", user_id="u1")
+
+    # simulate the lost write: roll the head back to v1
+    stale = store.get_version(scope_key, entry_id, 1)
+    head = store.get_head(scope_key, entry_id)
+    stale_head = dict(head)
+    stale_head.update(
+        {"entry_version_id": stale["entry_version_id"], "version": 1, "text": "旧内容", "scope_revision": 1}
+    )
+    store.put_head(stale_head)
+
+    counts = service.reconcile()
+    assert counts["head_rebuilt"] >= 1
+    fixed = store.get_head(scope_key, entry_id)
+    assert fixed["text"] == "新内容" and fixed["version"] == 2
+
+
+def test_embedding_reconciler_does_not_stamp_stale_vector(service, store):
+    """Review #9: a head revised while the embedder was running must NOT
+    receive the old text's vector marked ready."""
+    first = service.remember("旧文本", user_id="u1")["results"][0]
+    entry_id = first["entry"]["entry_id"]
+    scope_key = ScopeIdentity(user_id="u1").scope_key
+    head = store.get_head(scope_key, entry_id)
+    store.client.update(  # force pending for the OLD version
+        index=store.alias("head"),
+        id=f"h:{scope_key}:{entry_id}",
+        doc={"vector": None, "embedding_status": "pending"},
+        routing=scope_key,
+    )
+    service.revise(entry_id, text="全新文本", user_id="u1")  # head becomes v2 (ready)
+
+    # reconcile still holds the v1 snapshot: the fenced write must no-op
+    counts = service.embedder_reconciler.reconcile()
+    head = store.get_head(scope_key, entry_id)
+    assert head["embedding_status"] == "ready"
+    assert counts["embedded"] == 0  # nothing blindly stamped
+
+
+def test_reconciler_completes_instead_of_releasing_live_claim(service, store):
+    """Review #6: a claim whose publish completed (head live) but whose dedup
+    write was lost must be completed to active, never released."""
+    first = service.remember("完成但claim未落", user_id="u1")["results"][0]
+    scope_key = ScopeIdentity(user_id="u1").scope_key
+    content_hash = store.list_heads({"user_id": "u1"})[0]["content_hash"]
+    from mem0.context.vdb.write import compute_dedup_key
+
+    dedup_key = compute_dedup_key(scope_key, "fact", content_hash)
+    store.set_dedup_status(scope_key, dedup_key, "prepared", entry_id=first["entry"]["entry_id"],
+                           entry_version_id=first["entry"]["entry_version_id"])
+    # another entry publishes afterwards so scope.last_* no longer matches
+    service.remember("后续无关事实", user_id="u1")
+    service.recovery.prepared_ttl_seconds = 0  # force the claim into the repair scan
+
+    service.reconcile()
+    claim = store.get_dedup(scope_key, dedup_key)
+    assert claim["status"] == "active"  # completed, not released
+    assert claim["entry_id"] == first["entry"]["entry_id"]
+    # and the content is still a noop to remember
+    assert service.remember("完成但claim未落", user_id="u1")["results"][0]["outcome"] == "noop"
+
+
+def test_fallback_requires_all_failures_eligible(store):
+    """Review #11: one 400-class failure plus one outage must NOT trigger the
+    SQL sidecar — the config error must surface as 503."""
+    import sqlalchemy as sa
+    import tempfile
+
+    tmp = tempfile.mkdtemp()
+    engine = sa.create_engine(f"sqlite:///{tmp}/fb.db")
+    sidecar = HybridSidecar(engine, table_prefix="fb_", ensure_schema=True)
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=None,
+                                       storage_mode="HYBRID_STORAGE", hybrid_sidecar=sidecar)
+    service.remember("兜底语义数据", user_id="u1")
+    sidecar.sync_all(store)
+
+    from elasticsearch import BadRequestError, ConnectionError as EsConnectionError
+
+    state = {"n": 0}
+
+    def flaky(index):
+        state["n"] += 1
+        if "head" not in index:
+            return None
+        # semantic channel: 400-class (dims mismatch etc.), keyword: outage
+        return EsConnectionError("down") if state["n"] % 2 else BadRequestError("bad", meta={"status": 400}, body={})
+
+    store.client.fail_search = flaky
+    try:
+        with pytest.raises(PrimaryUnavailableError):
+            service.recall("兜底", user_id="u1", mode="auto")
+    finally:
+        store.client.fail_search = None

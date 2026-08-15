@@ -112,7 +112,7 @@ class FakeElasticsearch:
             index = self._resolve(index)
             doc = self._docs.get(index, {}).get(id)
             if doc is None:
-                raise NotFoundError("document missing", meta={"status": 404})
+                raise NotFoundError("document missing", meta={"status": 404}, body={})
             return {
                 "_id": id,
                 "_index": index,
@@ -127,7 +127,7 @@ class FakeElasticsearch:
             bucket = self._docs.setdefault(index, {})
             existing = bucket.get(id)
             if existing is None:
-                raise NotFoundError("document missing", meta={"status": 404})
+                raise NotFoundError("document missing", meta={"status": 404}, body={})
             if if_seq_no is not None and (
                 existing.seq_no != if_seq_no or existing.primary_term != (if_primary_term or 1)
             ):
@@ -146,7 +146,7 @@ class FakeElasticsearch:
             index = self._resolve(index)
             bucket = self._docs.setdefault(index, {})
             if id not in bucket:
-                raise NotFoundError("document missing", meta={"status": 404})
+                raise NotFoundError("document missing", meta={"status": 404}, body={})
             del bucket[id]
             return {"result": "deleted"}
 
