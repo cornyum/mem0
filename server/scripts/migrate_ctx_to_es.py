@@ -456,16 +456,19 @@ def verify_migration(store, engine, ctx_prefix: str, sample_size: int = 10) -> D
     )
     report["es_dedup_active"] = int(resp["hits"]["total"]["value"])
 
+    # The authority may legitimately hold MORE than the legacy store (live
+    # traffic after cutover, or a re-run migration); it must never hold LESS —
+    # a shortfall means rows were dropped (§9.4).
     count_mismatches = []
-    if "ctx_bindings" in report and report["es_scopes"] != report["ctx_bindings"]:
+    if "ctx_bindings" in report and report["es_scopes"] < report["ctx_bindings"]:
         count_mismatches.append(
-            f"scopes: es={report['es_scopes']} != ctx={report['ctx_bindings']}"
+            f"scopes: es={report['es_scopes']} < ctx={report['ctx_bindings']}"
         )
-    if "ctx_heads" in report and report["es_heads"] != report["ctx_heads"]:
-        count_mismatches.append(f"heads: es={report['es_heads']} != ctx={report['ctx_heads']}")
-    if "ctx_versions" in report and report["es_versions"] != report["ctx_versions"]:
+    if "ctx_heads" in report and report["es_heads"] < report["ctx_heads"]:
+        count_mismatches.append(f"heads: es={report['es_heads']} < ctx={report['ctx_heads']}")
+    if "ctx_versions" in report and report["es_versions"] < report["ctx_versions"]:
         count_mismatches.append(
-            f"versions: es={report['es_versions']} != ctx={report['ctx_versions']}"
+            f"versions: es={report['es_versions']} < ctx={report['ctx_versions']}"
         )
     report["count_mismatches"] = count_mismatches
 
