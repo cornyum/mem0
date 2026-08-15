@@ -11,23 +11,23 @@ All mutations are single-transaction and multi-worker safe across processes:
   (HTTP 409), and the whole transaction rolls back — including any inserts
   done under the stale read. This is the same single-UPDATE CAS PowerContext
   uses (pc_artifact_heads).
-- **One designed retry exception**: unconditional writes
-  (``expected_revision=None``) retry exactly once after a lost race —
-  on the retry the concurrent winner's state is committed and visible, so
-  duplicate-content appends converge to no-op (remember is idempotent by
-  contract). The retry also covers binding-creation races: an
-  IntegrityError from a concurrently created binding is re-raised through
-  the transaction boundary and the next attempt re-reads the winner's row
-  (an in-transaction re-read would be a stale snapshot on MySQL
-  REPEATABLE READ and an aborted transaction on PostgreSQL). Writes with
-  an explicit ``expected_revision`` never retry — the conflict is the
-  caller's signal.
+- **One designed retry policy**: unconditional writes
+  (``expected_revision=None``) retry a bounded number of times with short
+  randomized backoff — under concurrent writers on one scope the losers
+  converge (duplicate content becomes a no-op; distinct content lands on a
+  later attempt; binding-creation IntegrityErrors re-read the winner's
+  binding, since an in-transaction re-read would be a stale snapshot on
+  MySQL REPEATABLE READ and an aborted transaction on PostgreSQL).
+  Exhaustion surfaces the conflict. Writes with an explicit
+  ``expected_revision`` never retry — the conflict is the caller's signal.
 
 Timestamps are timezone-aware UTC. Reference/category lists are stored as
 canonical JSON text for dialect-portable semantics.
 """
 
 import json
+import random
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -579,21 +579,21 @@ class ContextStore:
     # -- internals ----------------------------------------------------------------
 
     def _run_cas(self, operation, expected_revision: Optional[int]):
-        """Unconditional writes (expected_revision=None) retry exactly once
-        after a lost race: on the retry the concurrent winner's state is
-        committed and visible, so duplicate-content appends converge to a
-        no-op instead of surfacing 409 (remember is idempotent by contract,
-        design §5.1). The retry also converges binding-creation races
-        (IntegrityError re-reads the winner's binding on the next attempt).
-        An explicit CAS expectation is never retried — the conflict is the
-        caller's signal."""
-        attempts = 1 if expected_revision is not None else 2
+        """Unconditional writes (expected_revision=None) retry a bounded
+        number of times with short randomized backoff: under a cold-start
+        stampede on one scope (many workers, first writes) a single retry
+        still loses races, and the idempotent-remember contract (design
+        §5.1) wants convergence, not 409s. The bound keeps genuine
+        contention visible eventually. An explicit CAS expectation is
+        never retried — the conflict is the caller's signal."""
+        attempts = 1 if expected_revision is not None else 4
         for attempt in range(attempts):
             try:
                 return operation()
             except (RevisionConflictError, exc.IntegrityError):
                 if attempt + 1 == attempts:
                     raise
+                time.sleep(random.uniform(0.005, 0.020))
 
     def _get_or_create_binding(self, conn, scope: ScopeIdentity) -> str:
         row = conn.execute(
