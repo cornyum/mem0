@@ -134,3 +134,11 @@ class RecallRequest(ScopeParams):
     mode: str = Field(default="auto", pattern="^(auto|semantic|keyword)$")
     rerank: bool = Field(default=False)
     threshold: Optional[float] = Field(default=None, ge=0, le=1)
+
+
+class PrepareContextRequest(ScopeParams):
+    """POST /v1/context/prepare (design §6.4)."""
+
+    query: str = Field(min_length=1, max_length=8192)
+    budget_bytes: int = Field(default=8000, ge=512, le=32768)
+    mode: str = Field(default="auto", pattern="^(auto|semantic|keyword)$")

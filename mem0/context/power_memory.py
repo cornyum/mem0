@@ -40,6 +40,7 @@ from mem0.context.models import (
     RememberResult,
 )
 from mem0.context.observability import Observability, application_op, shared_observability
+from mem0.context.prepared import DEFAULT_BUDGET_BYTES
 from mem0.context.scope import SCOPE_FIELDS, ScopeIdentity
 from mem0.context.store import ACTIVE, ContextStore, EntryVersionView, RememberOutcome
 
@@ -421,6 +422,51 @@ class PowerMemory(Memory):
         if isinstance(listed, list) and listed and isinstance(listed[0], list):
             return listed[0]
         return getattr(listed, "results", listed)
+
+    @application_op("prepare")
+    def prepare_context(
+        self,
+        query: str,
+        *,
+        budget_bytes: int = DEFAULT_BUDGET_BYTES,
+        mode: str = "auto",
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        """PreparedContext assembly (design §6.4): recall → ≤8 memory items,
+        each with its version-exact citation, rendered into the
+        trust-prefixed byte-budgeted envelope (schema
+        agentar.prepared-context.v1)."""
+        from mem0.context.prepared import MAX_MEMORY_ITEMS, PreparedItem, build_prepared_context
+
+        scope = ScopeIdentity(**ids)
+        recall = self.recall(query, limit=MAX_MEMORY_ITEMS, mode=mode, **ids)
+        try:
+            artifact_id = self.ctx_store.get_artifact_id(scope)
+        except EntryNotFoundError:
+            artifact_id = None
+
+        items = []
+        for result in recall["results"]:
+            meta = result.get("metadata") or {}
+            citation = None
+            if artifact_id and meta.get("entry_id"):
+                citation = {
+                    "artifact_id": artifact_id,
+                    "entry_id": meta["entry_id"],
+                    "entry_version_id": meta.get("entry_version_id"),
+                }
+            items.append(PreparedItem(type="memory", text=result["memory"], citation=citation))
+
+        prepared = build_prepared_context(items, budget_bytes=budget_bytes)
+        return {
+            "schema": prepared.schema,
+            "rendered": prepared.rendered,
+            "item_count": prepared.item_count,
+            "dropped": prepared.dropped,
+            "budget_bytes": prepared.budget_bytes,
+            "rendered_bytes": prepared.rendered_bytes,
+            "search_mode": recall["search_mode"],
+        }
 
     @application_op("reconcile")
     def reconcile_projections(self, *, limit: int = 100) -> Dict[str, Any]:

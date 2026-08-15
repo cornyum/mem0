@@ -22,6 +22,7 @@ from mem0.context.errors import ContextError
 from mem0.context.models import (
     ChangesRequest,
     ExpandRequest,
+    PrepareContextRequest,
     ReactivateRequest,
     RecallRequest,
     RememberRequest,
@@ -95,6 +96,19 @@ def backfill(batch_size: int = 500, _admin=Depends(require_admin)):
         raise HTTPException(status_code=422, detail="batch_size must be 1..5000")
     memory = get_memory_instance()
     return memory.backfill(batch_size=batch_size)
+
+
+@router.post("/v1/context/prepare")
+def prepare_context(req: PrepareContextRequest, _auth=Depends(verify_auth)):
+    """Deterministic, byte-budgeted prompt assembly with the trust
+    envelope (design §6.4)."""
+    memory = get_memory_instance()
+    return memory.prepare_context(
+        req.query,
+        budget_bytes=req.budget_bytes,
+        mode=req.mode,
+        **req.identity_kwargs(),
+    )
 
 
 @router.post("/v1/memory/retire")
