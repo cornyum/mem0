@@ -20,6 +20,10 @@ from auth import require_admin, verify_auth
 from context_runtime import get_readiness
 from mem0.context.errors import ContextError
 from mem0.context.models import (
+    CandidateDecideRequest,
+    CandidateListRequest,
+    CandidateProposeRequest,
+    CandidateReviseRequest,
     CaptureSourceRequest,
     ChangesRequest,
     ExpandRequest,
@@ -158,6 +162,54 @@ def handoff_continue(req: HandoffContinueRequest, _auth=Depends(verify_auth)):
     """Resolve a committed handoff as explicitly untrusted history (design §7)."""
     memory = get_memory_instance()
     return memory.continue_handoff(req.handoff_id, **req.identity_kwargs())
+
+
+@router.post("/v1/artifact-candidates/propose")
+def candidate_propose(req: CandidateProposeRequest, _auth=Depends(verify_auth)):
+    """Submit an experience/skill candidate (untrusted, out of retrieval)."""
+    memory = get_memory_instance()
+    return memory.propose_candidate(
+        family=req.family, proposal=req.proposal,
+        source_refs=req.source_refs, reason=req.reason, **req.identity_kwargs(),
+    )
+
+
+@router.post("/v1/artifact-candidates/list")
+def candidate_list(req: CandidateListRequest, _auth=Depends(verify_auth)):
+    memory = get_memory_instance()
+    status = None if req.status == "all" else req.status
+    return memory.list_candidates(status=status, limit=req.limit, **req.identity_kwargs())
+
+
+@router.post("/v1/artifact-candidates/revise")
+def candidate_revise(req: CandidateReviseRequest, _auth=Depends(verify_auth)):
+    memory = get_memory_instance()
+    return memory.revise_candidate(
+        req.candidate_id, proposal=req.proposal, source_refs=req.source_refs,
+        reason=req.reason, expected_version=req.expected_version, **req.identity_kwargs(),
+    )
+
+
+@router.post("/v1/artifact-candidates/approve")
+def candidate_approve(req: CandidateDecideRequest, _admin=Depends(require_admin)):
+    """Approve is the review gate (admin): atomic entry creation + terminal
+    candidate state (design §7)."""
+    memory = get_memory_instance()
+    return memory.decide_candidate(
+        req.candidate_id, approve=True,
+        expected_version=req.expected_version, decision_reason=req.decision_reason,
+        **req.identity_kwargs(),
+    )
+
+
+@router.post("/v1/artifact-candidates/reject")
+def candidate_reject(req: CandidateDecideRequest, _admin=Depends(require_admin)):
+    memory = get_memory_instance()
+    return memory.decide_candidate(
+        req.candidate_id, approve=False,
+        expected_version=req.expected_version, decision_reason=req.decision_reason,
+        **req.identity_kwargs(),
+    )
 
 
 @router.post("/v1/memory/retire")

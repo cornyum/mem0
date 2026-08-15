@@ -117,6 +117,11 @@ class ContextStore:
         self.t_lineage_sources = self.p2_metadata.tables[self.p2_names["lineage_sources"]]
         self.t_lineage_artifacts = self.p2_metadata.tables[self.p2_names["lineage_artifacts"]]
         self.t_handoffs = self.p2_metadata.tables[self.p2_names["handoffs"]]
+        # Review Inbox (design §7, RFC 0050)
+        self.candidate_names = tables.build_candidate_names(prefix)
+        self.candidate_metadata = tables.build_candidate_metadata(prefix)
+        self.t_candidate_heads = self.candidate_metadata.tables[self.candidate_names["candidate_heads"]]
+        self.t_candidate_versions = self.candidate_metadata.tables[self.candidate_names["candidate_versions"]]
 
     # -- schema lifecycle ---------------------------------------------------
 
@@ -126,6 +131,7 @@ class ContextStore:
         tests and standalone SDK deployments."""
         self.metadata.create_all(bind=self.engine)
         self.p2_metadata.create_all(bind=self.engine)
+        self.candidate_metadata.create_all(bind=self.engine)
 
     # -- write path -----------------------------------------------------------
 
@@ -906,6 +912,288 @@ class ContextStore:
                 )
             )
 
+    # -- P2: Review Inbox (design §7, RFC 0050) -----------------------------------
+
+    CANDIDATE_FAMILIES = ("experience", "skill")
+    CANDIDATE_PENDING = "pending"
+    CANDIDATE_APPROVED = "approved"
+    CANDIDATE_REJECTED = "rejected"
+
+    def propose_candidate(
+        self,
+        scope: ScopeIdentity,
+        *,
+        family: str,
+        proposal: dict,
+        source_refs: tuple[str, ...] | list[str] = (),
+        artifact_refs: tuple[str, ...] | list[str] = (),
+        reason: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create a pending candidate. Evidence must be non-empty and every
+        ref must exist in this scope's source journal (LLMs may draft
+        proposals but cannot invent evidence)."""
+        if family not in self.CANDIDATE_FAMILIES:
+            raise ValueError(f"family must be one of {self.CANDIDATE_FAMILIES}")
+        refs = [str(r) for r in source_refs or []]
+        if not refs:
+            raise ValueError("candidates need at least one source_ref as evidence")
+        known = {s["source_id"] for s in self.read_source_window(scope, after=0, limit=10000)}
+        unknown = [r for r in refs if r not in known]
+        if unknown:
+            raise ValueError(f"evidence refs not in source journal: {unknown[:3]}")
+
+        candidate_id = _new_id()
+        now = _utcnow()
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(self.t_candidate_heads).values(
+                    scope_key=scope.scope_key,
+                    candidate_id=candidate_id,
+                    family=family,
+                    status=self.CANDIDATE_PENDING,
+                    head_version=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                insert(self.t_candidate_versions).values(
+                    scope_key=scope.scope_key,
+                    candidate_id=candidate_id,
+                    version=1,
+                    proposal=json.dumps(proposal, ensure_ascii=False),
+                    source_refs=_dump_list(refs),
+                    artifact_refs=_dump_list(artifact_refs),
+                    reason=(reason or "")[:2000] or None,
+                    created_at=now,
+                )
+            )
+        return {"candidate_id": candidate_id, "status": self.CANDIDATE_PENDING, "version": 1}
+
+    def revise_candidate(
+        self,
+        scope: ScopeIdentity,
+        candidate_id: str,
+        *,
+        proposal: dict,
+        source_refs: tuple[str, ...] | list[str],
+        reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Full replacement of a PENDING candidate: version+1, the old
+        version stays immutable. Terminal candidates cannot be revised."""
+        with self.engine.begin() as conn:
+            head = self._require_candidate(conn, scope.scope_key, candidate_id)
+            if head["status"] != self.CANDIDATE_PENDING:
+                raise ValueError(f"candidate is {head['status']}, revise requires pending")
+            if expected_version is not None and head["head_version"] != expected_version:
+                raise RevisionConflictError(
+                    scope_key=scope.scope_key, artifact_id=candidate_id,
+                    expected_revision=expected_version, current_revision=head["head_version"],
+                )
+            next_version = head["head_version"] + 1
+            conn.execute(
+                insert(self.t_candidate_versions).values(
+                    scope_key=scope.scope_key,
+                    candidate_id=candidate_id,
+                    version=next_version,
+                    proposal=json.dumps(proposal, ensure_ascii=False),
+                    source_refs=_dump_list(source_refs),
+                    artifact_refs=_dump_list(()),
+                    reason=(reason or "")[:2000] or None,
+                    created_at=_utcnow(),
+                )
+            )
+            bumped = conn.execute(
+                update(self.t_candidate_heads)
+                .where(
+                    and_(
+                        self.t_candidate_heads.c.scope_key == scope.scope_key,
+                        self.t_candidate_heads.c.candidate_id == candidate_id,
+                        self.t_candidate_heads.c.head_version == head["head_version"],
+                    )
+                )
+                .values(head_version=next_version, updated_at=_utcnow())
+            )
+            if bumped.rowcount != 1:
+                raise RevisionConflictError(
+                    scope_key=scope.scope_key, artifact_id=candidate_id,
+                    expected_revision=head["head_version"],
+                )
+        return {"candidate_id": candidate_id, "status": self.CANDIDATE_PENDING, "version": next_version}
+
+    def decide_candidate(
+        self,
+        scope: ScopeIdentity,
+        candidate_id: str,
+        *,
+        approve: bool,
+        expected_version: Optional[int] = None,
+        decision_reason: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Approve/reject with the RFC 0050 discipline: approval creates the
+        retrieval-visible entry AND flips the candidate terminal state in
+        ONE transaction (rollback leaves it pending); double CAS on the
+        candidate version. Rejection is terminal with a reason."""
+        with self.engine.begin() as conn:
+            head = self._require_candidate(conn, scope.scope_key, candidate_id)
+            if head["status"] != self.CANDIDATE_PENDING:
+                raise ValueError(f"candidate already {head['status']} (terminal)")
+            if expected_version is not None and head["head_version"] != expected_version:
+                raise RevisionConflictError(
+                    scope_key=scope.scope_key, artifact_id=candidate_id,
+                    expected_revision=expected_version, current_revision=head["head_version"],
+                )
+
+            result_entry_version_id = None
+            if approve:
+                version_row = (
+                    conn.execute(
+                        select(self.t_candidate_versions)
+                        .where(
+                            and_(
+                                self.t_candidate_versions.c.scope_key == scope.scope_key,
+                                self.t_candidate_versions.c.candidate_id == candidate_id,
+                                self.t_candidate_versions.c.version == head["head_version"],
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                proposal = json.loads(version_row.proposal)
+                source_refs = json.loads(version_row.source_refs)
+                artifact_id = self._get_or_create_binding(conn, scope)
+                revision = self._read_memory_revision(conn, scope.scope_key, artifact_id)
+                entry_id, entry_version_id = _new_id(), _new_id()
+                text = _candidate_text(head["family"], proposal)
+                now = _utcnow()
+                conn.execute(
+                    insert(self.t_versions).values(
+                        scope_key=scope.scope_key, artifact_id=artifact_id,
+                        entry_id=entry_id, version=1, entry_version_id=entry_version_id,
+                        previous_version_id=None, kind=head["family"], text=text,
+                        source_refs=_dump_list(source_refs), artifact_refs=_dump_list(()),
+                        categories=_dump_list([head["family"]]),
+                        entry_content_hash=entry_content_hash(
+                            kind=head["family"], text=text, source_refs=source_refs,
+                        ),
+                        created_in_revision=revision + 1, provenance=NATIVE, created_at=now,
+                    )
+                )
+                self._write_lineage(
+                    conn, scope.scope_key, artifact_id, entry_id, entry_version_id,
+                    source_refs=source_refs, artifact_refs=(),
+                )
+                conn.execute(
+                    insert(self.t_heads).values(
+                        **_identity_values(scope),
+                        artifact_id=artifact_id, entry_id=entry_id, head_revision=1,
+                        entry_version_id=entry_version_id,
+                        entry_content_hash=entry_content_hash(
+                            kind=head["family"], text=text, source_refs=source_refs
+                        ),
+                        state=ACTIVE, searchable_text=analyzer.analyze(text),
+                        vector_id=None, pending_embed=True, created_at=now, updated_at=now,
+                    )
+                )
+                self._bump_memory_revision(conn, scope.scope_key, artifact_id, revision)
+                result_entry_version_id = entry_version_id
+
+            terminal = self.CANDIDATE_APPROVED if approve else self.CANDIDATE_REJECTED
+            bumped = conn.execute(
+                update(self.t_candidate_heads)
+                .where(
+                    and_(
+                        self.t_candidate_heads.c.scope_key == scope.scope_key,
+                        self.t_candidate_heads.c.candidate_id == candidate_id,
+                        self.t_candidate_heads.c.status == self.CANDIDATE_PENDING,
+                        self.t_candidate_heads.c.head_version == head["head_version"],
+                    )
+                )
+                .values(
+                    status=terminal,
+                    result_entry_version_id=result_entry_version_id,
+                    decision_reason=(decision_reason or "")[:512] or None,
+                    updated_at=_utcnow(),
+                )
+            )
+            if bumped.rowcount != 1:
+                raise RevisionConflictError(
+                    scope_key=scope.scope_key, artifact_id=candidate_id,
+                    expected_revision=head["head_version"],
+                )
+        return {
+            "candidate_id": candidate_id,
+            "status": terminal,
+            "result_entry_version_id": result_entry_version_id,
+        }
+
+    def list_candidates(
+        self, scope: ScopeIdentity, *, status: Optional[str] = CANDIDATE_PENDING, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        clauses = [self.t_candidate_heads.c.scope_key == scope.scope_key]
+        if status is not None:
+            clauses.append(self.t_candidate_heads.c.status == status)
+        with self.engine.connect() as conn:
+            heads = conn.execute(
+                select(self.t_candidate_heads)
+                .where(and_(*clauses))
+                .order_by(self.t_candidate_heads.c.created_at)
+                .limit(limit)
+            ).mappings().all()
+            out = []
+            for head in heads:
+                version = (
+                    conn.execute(
+                        select(self.t_candidate_versions)
+                        .where(
+                            and_(
+                                self.t_candidate_versions.c.scope_key == scope.scope_key,
+                                self.t_candidate_versions.c.candidate_id == head.candidate_id,
+                                self.t_candidate_versions.c.version == head.head_version,
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                out.append(
+                    {
+                        "candidate_id": head.candidate_id,
+                        "family": head.family,
+                        "status": head.status,
+                        "version": head.head_version,
+                        "proposal": json.loads(version.proposal),
+                        "source_refs": json.loads(version.source_refs),
+                        "reason": version.reason,
+                        "decision_reason": head.decision_reason,
+                        "created_at": head.created_at,
+                    }
+                )
+            return out
+
+    def _require_candidate(self, conn, scope_key: str, candidate_id: str) -> dict:
+        row = (
+            conn.execute(
+                select(
+                    self.t_candidate_heads.c.family,
+                    self.t_candidate_heads.c.status,
+                    self.t_candidate_heads.c.head_version,
+                ).where(
+                    and_(
+                        self.t_candidate_heads.c.scope_key == scope_key,
+                        self.t_candidate_heads.c.candidate_id == candidate_id,
+                    )
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise EntryNotFoundError(f"Candidate {candidate_id} not found")
+        return dict(row)
+
     # -- internals ----------------------------------------------------------------
 
     def _run_cas(self, operation, expected_revision: Optional[int]):
@@ -1105,3 +1393,16 @@ def _identity_values(scope: ScopeIdentity) -> dict[str, Any]:
 
 def _dump_list(values) -> str:
     return json.dumps(sorted(str(value) for value in values))
+
+
+def _candidate_text(family: str, proposal: dict) -> str:
+    """Flatten a proposal into the retrieval-visible entry text."""
+    if family == "experience":
+        parts = [
+            f"situation: {proposal.get('situation', '')}",
+            f"action: {proposal.get('action', '')}",
+            f"outcome: {proposal.get('outcome', '')}",
+            f"lesson: {proposal.get('lesson', '')}",
+        ]
+        return "\n".join(p for p in parts if p.split(": ", 1)[-1])
+    return proposal.get("description") or proposal.get("text") or json.dumps(proposal, ensure_ascii=False)

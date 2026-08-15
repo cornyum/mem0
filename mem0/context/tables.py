@@ -259,3 +259,48 @@ def build_p2_metadata(prefix: str = DEFAULT_TABLE_PREFIX) -> MetaData:
     )
 
     return metadata
+
+
+def build_candidate_names(prefix: str = DEFAULT_TABLE_PREFIX) -> dict[str, str]:
+    return {
+        "candidate_heads": f"{prefix}candidate_heads",
+        "candidate_versions": f"{prefix}candidate_versions",
+    }
+
+
+def build_candidate_metadata(prefix: str = DEFAULT_TABLE_PREFIX) -> MetaData:
+    """Review Inbox tables (design §7, RFC 0050): candidates are persisted,
+    untrusted, and excluded from retrieval until approved; approval and the
+    candidate's terminal state commit in one transaction."""
+    names = build_candidate_names(prefix)
+    metadata = MetaData()
+
+    Table(
+        names["candidate_heads"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("candidate_id", String(UUID_LEN), primary_key=True),
+        Column("family", String(32), nullable=False),  # experience | skill
+        Column("status", String(16), nullable=False),  # pending | approved | rejected
+        Column("head_version", Integer, nullable=False),
+        Column("result_entry_version_id", String(UUID_LEN)),
+        Column("decision_reason", String(512)),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+        Column("updated_at", DateTime(timezone=True), nullable=False),
+        Index(f"ix_{names['candidate_heads']}_status", "scope_key", "status"),
+    )
+
+    Table(
+        names["candidate_versions"],
+        metadata,
+        Column("scope_key", String(SCOPE_KEY_LEN), primary_key=True),
+        Column("candidate_id", String(UUID_LEN), primary_key=True),
+        Column("version", Integer, primary_key=True),
+        Column("proposal", Text, nullable=False),
+        Column("source_refs", Text, nullable=False, default="[]"),
+        Column("artifact_refs", Text, nullable=False, default="[]"),
+        Column("reason", String(2000)),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+    )
+
+    return metadata

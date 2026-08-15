@@ -176,3 +176,26 @@ class HandoffCommitRequest(ScopeParams):
 
 class HandoffContinueRequest(ScopeParams):
     handoff_id: str = Field(min_length=1, max_length=64)
+
+
+class CandidateProposeRequest(ScopeParams):
+    family: str = Field(pattern="^(experience|skill)$")
+    proposal: dict
+    source_refs: list[RefItem] = Field(min_length=1, max_length=32)
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class CandidateReviseRequest(CandidateProposeRequest):
+    candidate_id: str = Field(min_length=1, max_length=64)
+    expected_version: Optional[int] = Field(default=None, ge=1)
+
+
+class CandidateDecideRequest(ScopeParams):
+    candidate_id: str = Field(min_length=1, max_length=64)
+    expected_version: Optional[int] = Field(default=None, ge=1)
+    decision_reason: Optional[str] = Field(default=None, max_length=512)
+
+
+class CandidateListRequest(ScopeParams):
+    status: Optional[str] = Field(default="pending", pattern="^(pending|approved|rejected|all)$")
+    limit: int = Field(default=50, ge=1, le=100)

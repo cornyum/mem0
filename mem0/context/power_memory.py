@@ -479,6 +479,87 @@ class PowerMemory(Memory):
         )
 
 
+    # -- P2: Review Inbox (design §7, RFC 0050) ----------------------------------
+
+    @application_op("candidate_propose")
+    def propose_candidate(
+        self,
+        *,
+        family: str,
+        proposal: Dict[str, Any],
+        source_refs: tuple[str, ...] | list[str],
+        reason: Optional[str] = None,
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        """Submit an experience/skill candidate: persisted, untrusted, out
+        of retrieval until approved. Evidence refs must exist in this
+        scope's source journal — LLMs may draft, never invent evidence."""
+        scope = ScopeIdentity(**ids)
+        return self.ctx_store.propose_candidate(
+            scope, family=family, proposal=proposal, source_refs=source_refs, reason=reason
+        )
+
+    @application_op("candidate_list")
+    def list_candidates(
+        self, *, status: Optional[str] = "pending", limit: int = 50, **ids: Optional[str]
+    ) -> Dict[str, Any]:
+        scope = ScopeIdentity(**ids)
+        return {"candidates": self.ctx_store.list_candidates(scope, status=status, limit=limit)}
+
+    @application_op("candidate_revise")
+    def revise_candidate(
+        self,
+        candidate_id: str,
+        *,
+        proposal: Dict[str, Any],
+        source_refs: tuple[str, ...] | list[str],
+        reason: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        scope = ScopeIdentity(**ids)
+        return self.ctx_store.revise_candidate(
+            scope, candidate_id, proposal=proposal, source_refs=source_refs,
+            reason=reason, expected_version=expected_version,
+        )
+
+    @application_op("candidate_decide")
+    def decide_candidate(
+        self,
+        candidate_id: str,
+        *,
+        approve: bool,
+        expected_version: Optional[int] = None,
+        decision_reason: Optional[str] = None,
+        **ids: Optional[str],
+    ) -> Dict[str, Any]:
+        """Approve (atomic entry creation + terminal state) or reject.
+        Approved entries surface via recall immediately (stale merge) and
+        project to the vector store through reconciliation."""
+        scope = ScopeIdentity(**ids)
+        result = self.ctx_store.decide_candidate(
+            scope, candidate_id, approve=approve,
+            expected_version=expected_version, decision_reason=decision_reason,
+        )
+        if approve and result.get("result_entry_version_id"):
+            # Approved head is pending_embed=True; project now best-effort.
+            for pending in self.ctx_store.iter_pending_embed(limit=10):
+                if pending["entry_version_id"] == result["result_entry_version_id"]:
+                    pend_scope = ScopeIdentity(
+                        **{f: pending.get(f) for f in SCOPE_FIELDS if pending.get(f)}
+                    )
+                    self._project_to_vector_store(
+                        pend_scope,
+                        self.ctx_store.get_entry_version(
+                            pend_scope, pending["entry_id"], pending["entry_version_id"]
+                        ),
+                    )
+                    self.ctx_store.claim_pending(
+                        pend_scope, pending["entry_id"], pending["entry_version_id"]
+                    )
+                    break
+        return result
+
     # -- P2: sources & handoffs (design §7) --------------------------------------
 
     @application_op("capture_source")
