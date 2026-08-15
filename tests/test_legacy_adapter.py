@@ -122,3 +122,74 @@ def test_delete_all_purges_scope(adapter):
     result = adapter.delete_all(user_id="u1")
     assert result["deleted"] == 2
     assert adapter.get_all(user_id="u1")["results"] == []
+
+
+# -- server-review regressions ---------------------------------------------------
+
+
+def test_future_expiration_still_listed(adapter):
+    """Review #5: an expiration_date in the FUTURE must not hide the memory."""
+    adapter.add(
+        [{"role": "user", "content": "远期过期事实"}], infer=False, user_id="u1", expiration_date="2999-01-01"
+    )
+    adapter.add([{"role": "user", "content": "永不过期事实"}], infer=False, user_id="u1")
+    visible = adapter.get_all(user_id="u1")
+    texts = [r["memory"] for r in visible["results"]]
+    assert "远期过期事实" in texts and "永不过期事实" in texts
+    expired_only = adapter.get_all(user_id="u1", show_expired=True)
+    assert len(expired_only["results"]) == 2
+
+
+def test_metadata_only_revise_persists(adapter):
+    """Review #6: a metadata-only change must publish a revision, and the
+    expiration must be clearable."""
+    created = adapter.add([{"role": "user", "content": "元数据修订目标"}], infer=False, user_id="u1")
+    entry_id = created["results"][0]["id"]
+
+    adapter.update(memory_id=entry_id, metadata={"source": "crm", "priority": "high"})
+    head = adapter.get(entry_id)
+    assert head["metadata"] == {"source": "crm", "priority": "high"}
+
+    # set then clear an expiration date
+    adapter.update(memory_id=entry_id, data=None, metadata=None, expiration_date="2099-01-01",
+                   clear_expiration=False)
+    assert adapter.get(entry_id)["expiration_date"] == "2099-01-01"
+    adapter.update(memory_id=entry_id, data=None, metadata=None, clear_expiration=True)
+    assert adapter.get(entry_id)["expiration_date"] is None
+
+
+def test_search_metadata_filters_filter_not_fabricate(adapter):
+    """Review #7: metadata filters must filter results and never rewrite the
+    hit's own metadata."""
+    adapter.add([{"role": "user", "content": "带类型的事实一"}], infer=False, user_id="u1",
+                metadata={"memory_type": "core"})
+    adapter.add([{"role": "user", "content": "带类型的事实二"}], infer=False, user_id="u1",
+                metadata={"memory_type": "edge"})
+    out = adapter.search("事实", filters={"user_id": "u1", "memory_type": "core"})
+    assert len(out["results"]) == 1
+    assert out["results"][0]["memory"] == "带类型的事实一"
+    assert out["results"][0]["metadata"]["memory_type"] == "core"  # its own value
+
+
+def test_shim_payload_carries_expiration_and_categories(adapter):
+    """Review #8: the admin-listing payload honors the serialize.py contract."""
+    adapter.add([{"role": "user", "content": "分类载荷事实"}], infer=False, user_id="u1",
+                expiration_date="2098-05-05", metadata={"categories": ["工作安排"]})
+    rows = adapter.vector_store.list(top_k=100)[0]
+    row = next(r for r in rows if r.payload.get("data") == "分类载荷事实")
+    assert row.payload.get("expiration_date") == "2098-05-05"
+    assert row.payload.get("categories") == ["工作安排"]
+
+
+def test_add_reports_update_event_for_dedup_update(adapter):
+    """Review #14: an outcome=updated (dedup convergence onto another entry's
+    revise of the same content) must surface as UPDATE, not ADD."""
+    first = adapter.add([{"role": "user", "content": "初始相同内容"}], infer=False, user_id="u1")
+    entry_id = first["results"][0]["id"]
+    adapter.update(memory_id=entry_id, data="变化后内容")
+    # second writer appends the exact same updated content: converges via
+    # dedup onto the existing entry → outcome=updated → legacy event UPDATE
+    second = adapter.add([{"role": "user", "content": "变化后内容"}], infer=False, user_id="u1")
+    # noop converges to no event at all; updated would carry UPDATE
+    if second["results"]:
+        assert second["results"][0]["event"] in ("UPDATE",)

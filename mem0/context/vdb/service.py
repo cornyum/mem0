@@ -131,12 +131,14 @@ class MemoryApplicationService:
         obs: Optional[Observability] = None,
         storage_mode: str = "ONLY_VDB",
         hybrid_sidecar=None,
+        custom_instructions: Optional[str] = None,
     ):
         self.store = store
         self.llm = llm
         self.embedder = embedder
         self.reranker = reranker
         self.storage_mode = storage_mode
+        self.custom_instructions = (custom_instructions or "").strip() or None
         self.hybrid_sidecar = hybrid_sidecar
         self._obs = obs if obs is not None else shared_observability()
 
@@ -215,6 +217,7 @@ class MemoryApplicationService:
             obs=obs,
             storage_mode=storage_mode,
             hybrid_sidecar=hybrid_sidecar,
+            custom_instructions=config.custom_instructions,
         )
 
     # -- capabilities (design §10) --------------------------------------------------
@@ -267,6 +270,7 @@ class MemoryApplicationService:
         artifact_refs: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         expires_at: Optional[str] = None,
+        prompt: Optional[str] = None,
         expected_revision: Optional[int] = None,
         **ids: Optional[str],
     ) -> Dict[str, Any]:
@@ -287,6 +291,7 @@ class MemoryApplicationService:
                 artifact_refs=artifact_refs or [],
                 metadata=metadata,
                 expected_revision=expected_revision,
+                prompt_override=prompt,
             )
         if text is None:
             raise ContextValidationError("text is required for mode=append/auto")
@@ -315,6 +320,7 @@ class MemoryApplicationService:
         artifact_refs: List[str],
         metadata: Optional[Dict[str, Any]],
         expected_revision: Optional[int],
+        prompt_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         if self.llm is None:
             raise CapabilityNotSupportedError("extract")
@@ -327,6 +333,13 @@ class MemoryApplicationService:
         from mem0.memory.utils import get_fact_retrieval_messages
 
         system_prompt, user_prompt = get_fact_retrieval_messages(transcript)
+        # deployment taxonomy/custom instructions and the per-call legacy
+        # ``prompt`` override must actually reach the extraction LLM
+        extra = self.custom_instructions or ""
+        if prompt_override:
+            extra = f"{extra}\n\n{prompt_override}" if extra else prompt_override
+        if extra:
+            system_prompt = f"{system_prompt}\n\n{extra}"
         response = self.llm.generate_response(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             {"response_format": {"type": "json_object"}},
@@ -360,6 +373,7 @@ class MemoryApplicationService:
         artifact_refs: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         expires_at: Optional[str] = None,
+        clear_expires_at: bool = False,
         expected_revision: Optional[int] = None,
         **ids: Optional[str],
     ) -> RememberResult:
@@ -374,6 +388,7 @@ class MemoryApplicationService:
             artifact_refs=artifact_refs,
             metadata=metadata,
             expires_at=expires_at,
+            clear_expires_at=clear_expires_at,
             expected_revision=expected_revision,
         )
         return self._to_remember_result(outcome)
@@ -637,6 +652,8 @@ class MemoryApplicationService:
             "kind": head.get("kind"),
             "state": head.get("state"),
             "text": head.get("text"),
+            "content_hash": head.get("content_hash"),
+            "expires_at": head.get("expires_at"),
             "categories": head.get("categories") or [],
             "source_refs": head.get("source_refs") or [],
             "artifact_refs": head.get("artifact_refs") or [],

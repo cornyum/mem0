@@ -34,36 +34,45 @@ MCP_TOOLS_ENABLED = (
 class McpAuthMiddleware(BaseHTTPMiddleware):
     """Service-level MCP authentication (design §7.3): Bearer JWT or
     X-API-Key, same resolution rules as verify_auth. AUTH-disabled
-    deployments stay open (local development only)."""
+    deployments stay open (local development only). Only credential
+    resolution is error-scoped: transport/tool failures propagate with their
+    own status codes instead of being masked as 401."""
 
     async def dispatch(self, request, call_next):
         if request.url.path.endswith(("/docs", "/openapi.json")) or request.method == "OPTIONS":
             return await call_next(request)
+        authorized = self._authorize(request)
+        if authorized is not None:
+            return authorized
+        return await call_next(request)
+
+    @staticmethod
+    def _authorize(request):
+        import secrets
+
+        import auth as auth_mod
+        from db import SessionLocal
+
+        bearer = request.headers.get("authorization", "")
+        token = bearer[7:].strip() if bearer.lower().startswith("bearer ") else None
+        api_key = request.headers.get("x-api-key")
+        if token is None and api_key is None:
+            if auth_mod.AUTH_DISABLED:
+                return None
+            return JSONResponse(
+                {"detail": "Authentication required. Provide a Bearer token or X-API-Key header."},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         try:
-            import secrets
-
-            import auth as auth_mod
-            from db import SessionLocal
-
-            bearer = request.headers.get("authorization", "")
-            token = bearer[7:].strip() if bearer.lower().startswith("bearer ") else None
-            api_key = request.headers.get("x-api-key")
-            if token is None and api_key is None:
-                if auth_mod.AUTH_DISABLED:
-                    return await call_next(request)
-                return JSONResponse(
-                    {"detail": "Authentication required. Provide a Bearer token or X-API-Key header."},
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
             with SessionLocal() as db:
                 if token is not None:
                     auth_mod._resolve_user_from_jwt(token, db)
+                elif auth_mod.ADMIN_API_KEY and secrets.compare_digest(api_key, auth_mod.ADMIN_API_KEY):
+                    return None
                 else:
-                    if auth_mod.ADMIN_API_KEY and secrets.compare_digest(api_key, auth_mod.ADMIN_API_KEY):
-                        return await call_next(request)
                     auth_mod._resolve_user_from_api_key(api_key, db)
-            return await call_next(request)
+            return None
         except Exception:
             logger.warning("MCP auth rejected a request", exc_info=True)
             return JSONResponse({"detail": "Invalid credentials"}, status_code=401)
@@ -134,48 +143,71 @@ def build_mcp_server() -> "FastMCP":
         entry_id: str,
         text: str,
         user_id: str,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Explicit revision of one entry (creates a new immutable version)."""
         from server_state import get_app_service
 
-        result = get_app_service().revise(entry_id, text=text, kind=kind, user_id=user_id)
+        result = get_app_service().revise(
+            entry_id, text=text, kind=kind, **_ids(user_id, agent_id, run_id, tenant_id, session_id)
+        )
         return result.model_dump(mode="json")
 
     @mcp.tool
-    def retire(entry_id: str, user_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+    def retire(
+        entry_id: str,
+        user_id: str,
+        reason: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Logically deactivate an entry (history stays queryable)."""
         from server_state import get_app_service
 
-        result = get_app_service().retire(entry_id, reason=reason, user_id=user_id)
+        result = get_app_service().retire(
+            entry_id, reason=reason, **_ids(user_id, agent_id, None, None, session_id)
+        )
         return result.model_dump(mode="json")
 
     @mcp.tool
-    def reactivate(entry_id: str, user_id: str) -> Dict[str, Any]:
+    def reactivate(entry_id: str, user_id: str, agent_id: Optional[str] = None) -> Dict[str, Any]:
         """Reactivate a retired entry."""
         from server_state import get_app_service
 
-        result = get_app_service().reactivate(entry_id, user_id=user_id)
+        result = get_app_service().reactivate(entry_id, **_ids(user_id, agent_id, None, None, None))
         return result.model_dump(mode="json")
 
     @mcp.tool
-    def changes(user_id: str, since_revision: int = 0, limit: int = 200) -> Dict[str, Any]:
+    def changes(
+        user_id: str,
+        since_revision: int = 0,
+        limit: int = 200,
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Revision-cursor change feed for one scope (retire/reactivate included)."""
         from server_state import get_app_service
 
-        records = get_app_service().changes(user_id=user_id, since_revision=since_revision, limit=limit)
+        records = get_app_service().changes(
+            since_revision=since_revision, limit=limit, **_ids(user_id, agent_id, None, None, session_id)
+        )
         return {"changes": [r.model_dump(mode="json") for r in records]}
 
     @mcp.tool
     def expand(entry_id: str, entry_version_id: str, user_id: str) -> Dict[str, Any]:
         """Version-exact read with hash re-verification."""
         from mem0.context.models import MemoryCitation
-        from server_state import get_app_service
-
         from mem0.context.scope import ScopeIdentity
+        from server_state import get_app_service
 
         service = get_app_service()
         scope_doc = service.store.get_scope(ScopeIdentity(user_id=user_id).scope_key)
+        if scope_doc is None:
+            raise ValueError(f"No scope found for user_id={user_id!r} — nothing to expand")
         body = service.expand(
             MemoryCitation(
                 artifact_id=scope_doc.artifact_id,
@@ -187,18 +219,26 @@ def build_mcp_server() -> "FastMCP":
         return body.model_dump(mode="json")
 
     @mcp.tool
-    def get(entry_id: str, user_id: str) -> Dict[str, Any]:
+    def get(entry_id: str, user_id: str, agent_id: Optional[str] = None) -> Dict[str, Any]:
         """Point read of the current head for one entry."""
         from server_state import get_app_service
 
-        return get_app_service().get(entry_id, user_id=user_id)
+        return get_app_service().get(entry_id, **_ids(user_id, agent_id, None, None, None))
 
     @mcp.tool
-    def prepare(query: str, user_id: str, budget_bytes: int = 8000) -> Dict[str, Any]:
+    def prepare(
+        query: str,
+        user_id: str,
+        budget_bytes: int = 8000,
+        agent_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """PreparedContext: trust-enveloped, byte-budgeted prompt assembly."""
         from server_state import get_app_service
 
-        return get_app_service().prepare_context(query, budget_bytes=budget_bytes, user_id=user_id)
+        return get_app_service().prepare_context(
+            query, budget_bytes=budget_bytes, **_ids(user_id, agent_id, None, None, session_id)
+        )
 
     return mcp
 
@@ -216,8 +256,15 @@ def mount_mcp(app):
         logger.info("fastmcp not installed; MCP projection disabled (pip install fastmcp)")
         return None
     try:
+        from fastapi import FastAPI as _FastAPI
+
         mcp = build_mcp_server()
-        app.mount("/mcp", mcp.http_app(path="/"))
+        # auth-gated wrapper: a host that adopts the lifespan must never end
+        # up with an unauthenticated service-level memory API (review #10)
+        wrapper = _FastAPI()
+        wrapper.add_middleware(McpAuthMiddleware)
+        wrapper.mount("/", mcp.http_app(path="/"))
+        app.mount("/mcp", wrapper)
         logger.info("MCP projection mounted at /mcp (%d tools)", len(MCP_TOOLS_ENABLED))
         return mcp
     except Exception:

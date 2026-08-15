@@ -13,7 +13,7 @@ request_id } with the §7.4 status codes.
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _ERROR_CODES = {
     "ContextValidationError": ("validation_error", 422),
+    "EntryNotActiveError": ("entry_not_active", 409),
     "CapabilityNotSupportedError": ("capability_not_supported", 501),
     "RevisionConflictError": ("revision_conflict", 409),
     "EvidenceExpiredError": ("evidence_expired", 410),
@@ -274,15 +275,40 @@ def admin_backfill(_admin=Depends(require_admin)):
     _sql_feature_unavailable("backfill")
 
 
+_MIGRATION_JOBS: dict = {}
+
+
 @router.post("/v1/admin/memory/migrate")
-def admin_migrate(dry_run: bool = True, _admin=Depends(require_admin)):
-    """SQL ctx → ES authority migration task (design §9). Runs read-only
-    unless dry_run=false. The migration tool lives in
-    server/scripts/migrate_ctx_to_es.py; this endpoint executes it in-process."""
+def admin_migrate(background_tasks: BackgroundTasks, dry_run: bool = True, _admin=Depends(require_admin)):
+    """SQL ctx → ES authority migration task (design §7.6.2/§9). Read-only
+    unless dry_run=false. Runs as a background job (full table scans must not
+    hold an HTTP worker); poll /v1/admin/memory/migrate?job_id=... for the
+    report. The same tool is available as server/scripts/migrate_ctx_to_es.py."""
+    import secrets as _secrets
+
     from scripts.migrate_ctx_to_es import migrate_ctx_to_es
 
     service = get_app_service()
-    return migrate_ctx_to_es(service.store, dry_run=dry_run)
+    job_id = _secrets.token_hex(8)
+    _MIGRATION_JOBS[job_id] = {"status": "running", "dry_run": dry_run}
+
+    def _run():
+        try:
+            _MIGRATION_JOBS[job_id]["result"] = migrate_ctx_to_es(service.store, dry_run=dry_run)
+            _MIGRATION_JOBS[job_id]["status"] = "done"
+        except Exception as exc:
+            _MIGRATION_JOBS[job_id]["status"] = "failed"
+            _MIGRATION_JOBS[job_id]["error"] = str(exc)
+
+    background_tasks.add_task(_run)
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/v1/admin/memory/migrate")
+def admin_migrate_status(job_id: str, _admin=Depends(require_admin)):
+    if job_id not in _MIGRATION_JOBS:
+        raise HTTPException(status_code=404, detail="Unknown migration job")
+    return _MIGRATION_JOBS[job_id]
 
 
 def _sync_hybrid_sidecar(service):
@@ -303,7 +329,7 @@ def _sync_hybrid_sidecar(service):
 
 def _deprecated(response: JSONResponse) -> JSONResponse:
     response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = "yes"
+    response.headers["Sunset"] = "Sat, 31 Dec 2027 00:00:00 GMT"  # RFC 8594
     return response
 
 
@@ -349,9 +375,10 @@ def _set_ready_gauge(state: str) -> None:
 
 
 @router.get("/metrics")
-def metrics():
-    """Prometheus exposition (design §8.1). Content-free by construction:
-    labels are bounded vocabularies only."""
+def metrics(_auth=Depends(verify_auth)):
+    """Prometheus exposition (design §7.6.2/§8.1): admin/内网 surface —
+    authenticated by default; content-free by construction (bounded label
+    vocabularies only)."""
     try:
         from fastapi.responses import Response
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest

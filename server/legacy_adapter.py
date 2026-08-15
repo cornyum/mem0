@@ -54,15 +54,25 @@ class _Row:
 
 class _VectorStoreShim:
     """Minimal ``vector_store`` surface used by admin listing routes: the ES
-    head index answers ``list`` with legacy-shaped payload rows."""
+    head index answers ``list`` with legacy-shaped payload rows (serialize.py
+    contract incl. expiration_date/categories) and keyset pagination via
+    ``after_id`` for the export route."""
 
     def __init__(self, adapter: "LegacyMemoryAdapter"):
         self._adapter = adapter
 
-    def list(self, top_k: Optional[int] = None, filters: Optional[Dict] = None) -> List[List[_Row]]:
+    def list(
+        self,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict] = None,
+        after_id: Optional[str] = None,
+    ) -> List[List[_Row]]:
         heads = self._adapter.service.list_heads(limit=top_k or 1000, active_only=False)
         rows = []
-        for head in heads:
+        for head in sorted(heads, key=lambda h: h.get("entry_id") or ""):
+            entry_id = head.get("entry_id") or ""
+            if after_id is not None and entry_id <= after_id:
+                continue  # keyset: strictly after the cursor
             if filters:
                 if any(head.get(k) != v for k, v in filters.items() if v):
                     continue
@@ -71,10 +81,14 @@ class _VectorStoreShim:
             payload["hash"] = head.get("content_hash")
             payload["created_at"] = head.get("created_at")
             payload["updated_at"] = head.get("updated_at")
+            payload["expiration_date"] = (head.get("expires_at") or "").split("T")[0] or None
+            payload["categories"] = head.get("categories") or (head.get("metadata") or {}).get("categories") or []
             for key in PROMOTED_KEYS:
                 if head.get(key):
                     payload[key] = head[key]
-            rows.append(_Row(head.get("entry_id"), payload))
+            rows.append(_Row(entry_id, payload))
+            if top_k and len(rows) >= top_k:
+                break
         return [rows]
 
 
@@ -107,8 +121,6 @@ class LegacyMemoryAdapter:
         payload_metadata = dict(metadata or {})
         if memory_type:
             payload_metadata.setdefault("memory_type", memory_type)
-        if prompt:
-            payload_metadata.setdefault("custom_prompt", True)
 
         if use_extract:
             response = self.service.remember(
@@ -116,10 +128,15 @@ class LegacyMemoryAdapter:
                 mode="extract",
                 metadata=payload_metadata or None,
                 expires_at=self._expires_at(expiration_date),
+                prompt=prompt,
                 **ids,
             )
             results = [
-                {"id": r["entry"]["entry_id"], "memory": r["entry"]["text"], "event": "ADD"}
+                {
+                    "id": r["entry"]["entry_id"],
+                    "memory": r["entry"]["text"],
+                    "event": "ADD" if r["outcome"] == "created" else "UPDATE",
+                }
                 for r in response["results"]
                 if r.get("entry")
             ]
@@ -135,8 +152,9 @@ class LegacyMemoryAdapter:
             first = response["results"][0]
             results = []
             if first["outcome"] != "noop" and first.get("entry"):
+                event = "ADD" if first["outcome"] == "created" else "UPDATE"
                 results.append(
-                    {"id": first["entry"]["entry_id"], "memory": first["entry"]["text"], "event": "ADD"}
+                    {"id": first["entry"]["entry_id"], "memory": first["entry"]["text"], "event": event}
                 )
         return {"results": results, "relations": []}
 
@@ -147,6 +165,7 @@ class LegacyMemoryAdapter:
         data: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         expiration_date: Optional[str] = None,
+        clear_expiration: bool = False,
         **ids: Optional[str],
     ) -> Dict[str, Any]:
         head = self._find_head(memory_id, ids)
@@ -154,7 +173,8 @@ class LegacyMemoryAdapter:
             memory_id,
             text=data,
             metadata=metadata,
-            expires_at=self._expires_at(expiration_date),
+            expires_at=None if clear_expiration else self._expires_at(expiration_date),
+            clear_expires_at=clear_expiration,
             **self._scope_kwargs(head),
         )
         new_text = data if data is not None else head.get("text")
@@ -180,14 +200,18 @@ class LegacyMemoryAdapter:
         provided = {k: v for k, v in ids.items() if v}
         if not provided:
             raise ValueError("At least one identifier is required.")
-        heads = self.service.list_heads(limit=5000, active_only=False, **provided)
         deleted = 0
-        for head in heads:
-            try:
-                self.service.purge(head["entry_id"], reason="legacy delete_all", **provided)
-                deleted += 1
-            except Exception:
-                logger.warning("delete_all: entry %s failed", head.get("entry_id"), exc_info=True)
+        while True:
+            heads = self.service.list_heads(limit=1000, active_only=False, **provided)
+            if not heads:
+                break
+            for head in heads:
+                try:
+                    self.service.purge(head["entry_id"], reason="legacy delete_all", **provided)
+                    deleted += 1
+                except Exception:
+                    logger.warning("delete_all: entry %s failed", head.get("entry_id"), exc_info=True)
+                    return {"deleted": deleted, "truncated": True}
         return {"deleted": deleted}
 
     # -- read -------------------------------------------------------------------
@@ -219,10 +243,10 @@ class LegacyMemoryAdapter:
         for hit in recall["results"]:
             row = _legacy_row(hit, score=hit.get("score"))
             row["matched_by"] = hit.get("matched_by") or []
-            if filters:
-                meta = dict(row.get("metadata") or {})
-                meta.update({k: v for k, v in filters.items()})
-                row["metadata"] = meta
+            if filters and any(
+                (row.get("metadata") or {}).get(k) != v for k, v in filters.items()
+            ):
+                continue  # metadata half of the legacy filters (§7.2): filter, never fabricate
             results.append(row)
         return {
             "results": results,
@@ -250,7 +274,10 @@ class LegacyMemoryAdapter:
             provided.update({k: v for k, v in filters.items() if k in SCOPE_FIELDS and v})
         heads = self.service.list_heads(limit=top_k or 1000, active_only=True, **provided)
         if not show_expired:
-            heads = [h for h in heads if not h.get("expires_at")]
+            from datetime import datetime, timezone
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            heads = [h for h in heads if not h.get("expires_at") or h["expires_at"] > now_iso]
         return {"results": [_legacy_row(h) for h in heads]}
 
     def history(self, *, memory_id: str) -> List[Dict[str, Any]]:

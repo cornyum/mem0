@@ -82,7 +82,6 @@ def migrate_ctx_to_es(
         logger.info("dry-run: would migrate %s", counts)
         return {"status": "dry_run", "counts": counts}
 
-    from mem0.context.hashing import entry_content_hash
     from mem0.context.vdb.write import compute_dedup_key
     from mem0.utils.lemmatization import lemmatize_for_bm25
 
@@ -241,114 +240,151 @@ def migrate_ctx_to_es(
     # 4. unbound legacy vector rows → provenance=legacy_backfill (§9.3)
     if legacy_collection:
         try:
-            resp = store.client.search(index=legacy_collection, **{"size": 1000, "query": {"match_all": {}}})
-            for hit in resp["hits"]["hits"]:
-                if hit["_id"] in bound_vector_ids:
-                    continue
-                payload = (hit["_source"] or {}).get("metadata") or {}
-                text_value = payload.get("data") or (hit["_source"] or {}).get("text")
-                if not text_value:
-                    continue
-                identity = {k: payload.get(k) for k in IDENTITY if payload.get(k)}
-                if not identity:
-                    continue
-                from mem0.context.scope import ScopeIdentity
-
-                scope = ScopeIdentity(**identity)
-                scope_doc = store.get_scope(scope.scope_key)
-                if scope_doc is None:
-                    store.create_scope(scope.scope_key, scope.fields)
-                    scope_doc = store.get_scope(scope.scope_key)
-                revision = scope_doc.published_revision + 1
-                entry_id = hit["_id"]
-                entry_version_id = f"{entry_id}-v1"
-                kind = payload.get("memory_type") or "fact"
-                content_hash = entry_content_hash(kind=kind, text=text_value)
-                store.put_version(
-                    {
-                        "scope_key": scope.scope_key,
-                        **scope.fields,
-                        "entry_id": entry_id,
-                        "entry_version_id": entry_version_id,
-                        "version": 1,
-                        "kind": kind,
-                        "content_hash": content_hash,
-                        "text": text_value,
-                        "source_refs": [],
-                        "artifact_refs": [],
-                        "categories": payload.get("categories") or [],
-                        "scope_revision": revision,
-                        "provenance": "legacy_backfill",
-                        "legacy_ids": [entry_id],
-                        "created_at": _iso(payload.get("created_at")),
-                    }
-                )
-                head_doc = {
-                    "scope_key": scope.scope_key,
-                    **scope.fields,
-                    "entry_id": entry_id,
-                    "entry_version_id": entry_version_id,
-                    "version": 1,
-                    "kind": kind,
-                    "state": "active",
-                    "content_hash": content_hash,
-                    "scope_revision": revision,
-                    "text": text_value,
-                    "searchable_text": lemmatize_for_bm25(text_value),
-                    "categories": payload.get("categories") or [],
-                    "source_refs": [],
-                    "artifact_refs": [],
-                    "embedding_status": "ready" if (hit["_source"] or {}).get("vector") else "pending",
-                    "legacy_ids": [entry_id],
-                    "created_at": _iso(payload.get("created_at")),
-                    "updated_at": _iso(payload.get("updated_at")),
-                }
-                if (hit["_source"] or {}).get("vector"):
-                    head_doc["vector"] = hit["_source"]["vector"]
-                store.put_head(head_doc)
-                store.put_event(
-                    {
-                        "scope_key": scope.scope_key,
-                        "scope_revision": revision,
-                        "event_type": "created",
-                        "entry_id": entry_id,
-                        "entry_version_id": entry_version_id,
-                        "version": 1,
-                        "kind": kind,
-                        "provenance": "legacy_backfill",
-                        "content_hash": content_hash,
-                        "state_after": "active",
-                        "created_at": _iso(payload.get("created_at")),
-                    }
-                )
-                store.cas_publish(
-                    scope.scope_key,
-                    if_seq_no=store.get_scope(scope.scope_key).seq_no,
-                    if_primary_term=store.get_scope(scope.scope_key).primary_term,
-                    published_revision=revision,
-                    last_event_type="created",
-                    last_entry_id=entry_id,
-                    last_entry_version_id=entry_version_id,
-                )
-                store.set_dedup_status(
-                    scope.scope_key,
-                    compute_dedup_key(scope.scope_key, kind, content_hash),
-                    "active",
-                    entry_id=entry_id,
-                    entry_version_id=entry_version_id,
-                    scope_revision=revision,
-                )
-                counts["legacy_backfill"] += 1
-                counts["versions"] += 1
-                counts["heads"] += 1
-                counts["events"] += 1
-                counts["dedup_active"] += 1
+            scanned = 0
+            backfilled = 0
+            failed_ids: list = []
+            search_after = None
+            while True:
+                body = {"size": 500, "query": {"match_all": {}}, "sort": [{"_id": {"order": "asc"}}]}
+                if search_after is not None:
+                    body["search_after"] = [search_after]
+                resp = store.client.search(index=legacy_collection, **body)
+                hits = resp["hits"]["hits"]
+                if not hits:
+                    break
+                scanned += len(hits)
+                for hit in hits:
+                    search_after = hit.get("sort", [hit["_id"]])[0]
+                    try:
+                        if _backfill_legacy_row(store, hit, bound_vector_ids, counts):
+                            backfilled += 1
+                    except Exception:
+                        failed_ids.append(hit["_id"])
+                        logger.warning("backfill row %s failed", hit["_id"], exc_info=True)
+                if len(hits) < 500:
+                    break
+            logger.info("legacy backfill scan: %d rows scanned, %d backfilled, %d failed",
+                        scanned, backfilled, len(failed_ids))
+            if failed_ids:
+                counts["legacy_backfill_failed"] = len(failed_ids)
         except Exception:
             logger.warning("legacy vector backfill skipped", exc_info=True)
 
     # 5. verification (§9.4)
     verification = verify_migration(store, engine, ctx_prefix, sample_size)
     return {"status": "migrated", "counts": counts, "verification": verification}
+
+
+def _backfill_legacy_row(store, hit, bound_vector_ids, counts) -> bool:
+    """Synthesize one legacy_backfill entry (§9.3). Returns True when a row
+    was written; raises on per-row failure so the caller can continue."""
+    from mem0.context.hashing import entry_content_hash
+    from mem0.context.vdb.write import compute_dedup_key
+    from mem0.utils.lemmatization import lemmatize_for_bm25
+
+    if hit["_id"] in bound_vector_ids:
+        return False
+    payload = (hit["_source"] or {}).get("metadata") or {}
+    text_value = payload.get("data") or (hit["_source"] or {}).get("text")
+    if not text_value:
+        return False
+    identity = {k: payload.get(k) for k in IDENTITY if payload.get(k)}
+    if not identity:
+        return False
+    from mem0.context.scope import ScopeIdentity
+
+    scope = ScopeIdentity(**identity)
+    scope_doc = store.get_scope(scope.scope_key)
+    if scope_doc is None:
+        store.create_scope(scope.scope_key, scope.fields)
+        scope_doc = store.get_scope(scope.scope_key)
+    revision = scope_doc.published_revision + 1
+    entry_id = hit["_id"]
+    entry_version_id = f"{entry_id}-v1"
+    kind = payload.get("memory_type") or "fact"
+    content_hash = entry_content_hash(kind=kind, text=text_value)
+    store.put_version(
+        {
+            "scope_key": scope.scope_key,
+            **scope.fields,
+            "entry_id": entry_id,
+            "entry_version_id": entry_version_id,
+            "version": 1,
+            "kind": kind,
+            "content_hash": content_hash,
+            "text": text_value,
+            "source_refs": [],
+            "artifact_refs": [],
+            "categories": payload.get("categories") or [],
+            "scope_revision": revision,
+            "provenance": "legacy_backfill",
+            "legacy_ids": [entry_id],
+            "created_at": _iso(payload.get("created_at")),
+        }
+    )
+    head_doc = {
+        "scope_key": scope.scope_key,
+        **scope.fields,
+        "entry_id": entry_id,
+        "entry_version_id": entry_version_id,
+        "version": 1,
+        "kind": kind,
+        "state": "active",
+        "content_hash": content_hash,
+        "scope_revision": revision,
+        "text": text_value,
+        "searchable_text": lemmatize_for_bm25(text_value),
+        "categories": payload.get("categories") or [],
+        "source_refs": [],
+        "artifact_refs": [],
+        "embedding_status": "ready" if (hit["_source"] or {}).get("vector") else "pending",
+        "legacy_ids": [entry_id],
+        "created_at": _iso(payload.get("created_at")),
+        "updated_at": _iso(payload.get("updated_at")),
+    }
+    if (hit["_source"] or {}).get("vector"):
+        head_doc["vector"] = hit["_source"]["vector"]
+    store.put_head(head_doc)
+    store.put_event(
+        {
+            "scope_key": scope.scope_key,
+            "scope_revision": revision,
+            "event_type": "created",
+            "entry_id": entry_id,
+            "entry_version_id": entry_version_id,
+            "version": 1,
+            "kind": kind,
+            "provenance": "legacy_backfill",
+            "content_hash": content_hash,
+            "state_after": "active",
+            "created_at": _iso(payload.get("created_at")),
+        }
+    )
+    # single scope fetch for a consistent CAS pair (review #20b)
+    scope_doc = store.get_scope(scope.scope_key)
+    store.cas_publish(
+        scope.scope_key,
+        if_seq_no=scope_doc.seq_no,
+        if_primary_term=scope_doc.primary_term,
+        published_revision=revision,
+        last_event_type="created",
+        last_entry_id=entry_id,
+        last_entry_version_id=entry_version_id,
+    )
+    store.set_dedup_status(
+        scope.scope_key,
+        compute_dedup_key(scope.scope_key, kind, content_hash),
+        "active",
+        entry_id=entry_id,
+        entry_version_id=entry_version_id,
+        scope_revision=revision,
+    )
+    counts["legacy_backfill"] += 1
+    counts["versions"] += 1
+    counts["heads"] += 1
+    counts["events"] += 1
+    counts["dedup_active"] += 1
+    return True
 
 
 def _rows_for(rows, entry_id):
@@ -401,10 +437,37 @@ def verify_migration(store, engine, ctx_prefix: str, sample_size: int = 10) -> D
     except Exception as exc:
         report["legacy_counts_error"] = str(exc)
 
+    # refresh every index first: verification must read published state, not
+    # pre-refresh segments; and count with track_total_hits (ES caps at 10k)
+    for family in ("scope", "head", "version", "event", "dedup"):
+        try:
+            store.client.indices.refresh(index=store.alias(family))
+        except Exception:
+            pass
+
     es_heads = store.list_heads(limit=10000, active_only=False)
     report["es_heads"] = len(es_heads)
-    resp = store._search("version", {"size": 1, "query": {"match_all": {}}})
-    report["es_versions_truncated_probe"] = int(resp["hits"]["total"]["value"])
+    resp = store._search(
+        "version", {"size": 0, "track_total_hits": True, "query": {"match_all": {}}}
+    )
+    report["es_versions"] = int(resp["hits"]["total"]["value"])
+    resp = store._search(
+        "dedup", {"size": 0, "track_total_hits": True, "query": {"term": {"status": "active"}}}
+    )
+    report["es_dedup_active"] = int(resp["hits"]["total"]["value"])
+
+    count_mismatches = []
+    if "ctx_bindings" in report and report["es_scopes"] != report["ctx_bindings"]:
+        count_mismatches.append(
+            f"scopes: es={report['es_scopes']} != ctx={report['ctx_bindings']}"
+        )
+    if "ctx_heads" in report and report["es_heads"] != report["ctx_heads"]:
+        count_mismatches.append(f"heads: es={report['es_heads']} != ctx={report['ctx_heads']}")
+    if "ctx_versions" in report and report["es_versions"] != report["ctx_versions"]:
+        count_mismatches.append(
+            f"versions: es={report['es_versions']} != ctx={report['ctx_versions']}"
+        )
+    report["count_mismatches"] = count_mismatches
 
     mismatches = []
     from mem0.context.hashing import entry_content_hash
@@ -427,7 +490,7 @@ def verify_migration(store, engine, ctx_prefix: str, sample_size: int = 10) -> D
             mismatches.append({"entry_id": head["entry_id"], "reason": "hash_mismatch"})
     report["sampled"] = min(sample_size, len(es_heads))
     report["sample_mismatches"] = mismatches
-    report["ok"] = not mismatches
+    report["ok"] = not mismatches and not count_mismatches
     return report
 
 

@@ -67,3 +67,12 @@ class EntryNotFoundError(ContextError):
     """Referenced entry/version does not exist in the authoritative store."""
 
     default_status_code = 404
+
+
+class EntryNotActiveError(ContextError):
+    """The entry exists but is retired — a client-state conflict (409)."""
+
+    default_status_code = 409
+
+    def __init__(self, entry_id: str):
+        super().__init__(f"Entry {entry_id} is not active; reactivate before revising")

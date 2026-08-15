@@ -512,7 +512,11 @@ def list_bundled_providers(_auth=Depends(verify_auth)):
 def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
     """Set memory configuration. Requires admin role."""
     _validate_bundled_providers(config)
-    update_config(config)
+    try:
+        update_config(config)
+    except ValueError as exc:
+        # storage-topology rejections (ADR-7) are client errors, not 500s
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"message": "Configuration set successfully"}
 
 

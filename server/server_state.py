@@ -18,6 +18,10 @@ def set_session_factory(factory: Callable) -> None:
     _session_factory = factory
 
 
+class _OverridesLoadFailed(Exception):
+    """Distinguishes 'no stored overrides' from 'storage read failed'."""
+
+
 def _load_overrides() -> Dict[str, Any]:
     try:
         if _session_factory is None:
@@ -32,8 +36,10 @@ def _load_overrides() -> Dict[str, Any]:
             return json.loads(row.value)
         finally:
             session.close()
-    except Exception:
-        return {}
+    except _OverridesLoadFailed:
+        raise
+    except Exception as exc:
+        raise _OverridesLoadFailed(str(exc)) from exc
 
 
 def _save_overrides(overrides: Dict[str, Any]) -> None:
@@ -206,14 +212,24 @@ def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
     with _state_lock:
         _forbid_storage_topology_changes(updates)
         next_config = _merge_config(_current_config, updates)
+        # build FIRST: a failed construction must not leave a phantom config
+        # paired with the stale service (server review #4)
+        app_service, memory_instance = _build_memory(next_config)
         _current_config = next_config
-        _app_service, _memory_instance = _build_memory(next_config)
+        _app_service = app_service
+        _memory_instance = memory_instance
         if updates:
             # Skip the read-modify-write for refresh-only calls (empty updates):
             # with multiple uvicorn workers there is no cross-process lock, so a
             # redundant rewrite could roll back another worker's concurrent
             # POST /configure persist.
-            overrides = _load_overrides()
+            try:
+                overrides = _load_overrides()
+            except _OverridesLoadFailed:
+                # a transient read failure must not wipe what is stored
+                # (server review #19); the in-memory build stays authoritative
+                logging.warning("config_overrides load failed; persist skipped", exc_info=True)
+                return deepcopy(_current_config)
             overrides = _merge_config(overrides, updates)
             _save_overrides(overrides)
         return deepcopy(_current_config)

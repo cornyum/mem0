@@ -297,6 +297,8 @@ class RecallCoordinator:
             "version": doc.get("version"),
             "kind": doc.get("kind"),
             "text": doc.get("text"),
+            "content_hash": doc.get("content_hash"),
+            "expires_at": doc.get("expires_at"),
             "score": round(cand.rrf_score, 6),
             "matched_by": list(dict.fromkeys(cand.matched_by)),
             "categories": doc.get("categories") or [],

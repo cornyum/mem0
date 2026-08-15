@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from mem0.context.errors import (
-    ContextError,
+    EntryNotActiveError,
     EntryNotFoundError,
     RevisionConflictError,
 )
@@ -173,6 +173,7 @@ class WriteCoordinator:
         artifact_refs: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         expires_at: Optional[str] = None,
+        clear_expires_at: bool = False,
         expected_revision: Optional[int] = None,
     ) -> WriteOutcome:
         scope_doc = self._ensure_scope(scope)
@@ -180,7 +181,7 @@ class WriteCoordinator:
         if head is None:
             raise EntryNotFoundError(f"Entry {entry_id} not found in scope")
         if head.get("state") != ACTIVE:
-            raise ContextError("Entry is not active; reactivate before revising")
+            raise EntryNotActiveError(entry_id)
 
         next_kind = kind if kind is not None else head["kind"]
         next_text = text if text is not None else head["text"]
@@ -195,7 +196,13 @@ class WriteCoordinator:
             artifact_refs=next_artifact_refs,
             categories=next_categories,
         )
-        if content_hash == head.get("content_hash"):
+        # Non-hash facets count as changes too: a metadata- or expiry-only
+        # revise must publish, not silently noop (server review #6)
+        metadata_changed = metadata is not None and metadata != (head.get("metadata") or {})
+        expiry_changed = (expires_at is not None and expires_at != head.get("expires_at")) or (
+            clear_expires_at and head.get("expires_at")
+        )
+        if content_hash == head.get("content_hash") and not metadata_changed and not expiry_changed:
             return WriteOutcome(
                 outcome="noop",
                 event_type=None,
@@ -224,7 +231,13 @@ class WriteCoordinator:
         )
         if existing is not None:
             if existing.get("status") == ACTIVE:
-                if existing.get("entry_id") == entry_id:
+                own_claim = existing.get("entry_id") == entry_id
+                nothing_changed = (
+                    content_hash == head.get("content_hash")
+                    and not metadata_changed
+                    and not expiry_changed
+                )
+                if own_claim and nothing_changed:
                     # Same entry converging onto identical content: no-op.
                     return WriteOutcome(
                         outcome="noop",
@@ -240,9 +253,12 @@ class WriteCoordinator:
                         content_hash=content_hash,
                         state_after=ACTIVE,
                     )
-                raise DedupConflictError(
-                    f"Same content already active in entry {existing.get('entry_id')}"
-                )
+                if not own_claim:
+                    raise DedupConflictError(
+                        f"Same content already active in entry {existing.get('entry_id')}"
+                    )
+                # own claim with a metadata/expiry-only change: the dedup key
+                # (content) is unchanged and already ours — publish directly
             if existing.get("status") == "prepared" and not self._claim_expired(existing):
                 raise OperationInProgressError(
                     "Another revise of the same content is in flight; retry the same command"
@@ -273,7 +289,7 @@ class WriteCoordinator:
             dedup_key=dedup_key,
             old_dedup_key=old_dedup_key,
             metadata=metadata if metadata is not None else head.get("metadata"),
-            expires_at=expires_at if expires_at is not None else head.get("expires_at"),
+            expires_at=None if clear_expires_at else (expires_at if expires_at is not None else head.get("expires_at")),
             expected_revision=expected_revision,
             previous_entry_version_id=head.get("entry_version_id"),
         )

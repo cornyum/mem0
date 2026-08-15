@@ -143,11 +143,13 @@ def register_v3_readiness(service) -> None:
     with _lock:
         registry = ReadinessRegistry()
         registry.register(_AppDbProbe())
-        # ONLY_VDB: ES is the authority — hard dependency. HYBRID: ES failure
-        # degrades (SQL FTS may keep keyword/auto recall alive) but writes
-        # still 503, so the probe stays blocking in both modes; the sidecar
-        # probe reports the degraded leg.
-        registry.register(_ElasticsearchProbe(service.store, blocking=True))
+        # ONLY_VDB: ES is the authority — a hard dependency (not_ready on
+        # outage). HYBRID: ES failure DEGRADES (design §10) — keyword/auto
+        # recall keeps serving from the SQL sidecar, writes still 503 via the
+        # domain errors, so the probe must not pull the server from rotation.
+        registry.register(
+            _ElasticsearchProbe(service.store, blocking=(STORAGE_MODE == "ONLY_VDB"))
+        )
         sidecar = get_hybrid_sidecar()
         if sidecar is not None:
             registry.register(_SqlFtsProbe(sidecar))
