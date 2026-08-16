@@ -83,6 +83,24 @@ def test_vector_store_provider_restriction():
         validate_vector_store_provider("pgvector", "ONLY_VDB")
 
 
+def test_reset_evicts_legacy_concrete_index_occupying_alias_name(store):
+    """Legacy layouts stored data in concrete indices named like the current
+    aliases; reset must evict them or ensure_indices fails with
+    invalid_alias_name_exception on ES 8."""
+    legacy = store.alias("head")
+    assert store.client.indices.exists_alias(name=legacy)
+
+    # Simulate a pre-alias concrete index occupying the alias name.
+    store.client.indices_created.add(legacy)
+    store.client.aliases.pop(legacy)
+
+    store.delete_all()
+
+    assert legacy not in store.client.indices_created
+    assert store.client.indices.exists_alias(name=legacy)
+    assert store.client.aliases[legacy] == store._index_name("head")
+
+
 # -- write protocol: remember --------------------------------------------------------
 
 

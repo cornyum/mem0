@@ -36,6 +36,10 @@ class FakeIndices:
     def exists_alias(self, name=None, index=None):
         return name in self._store.aliases
 
+    def delete_alias(self, index=None, name=None, **kwargs):
+        self._store.aliases.pop(name, None)
+        return {"acknowledged": True}
+
     def create(self, index=None, settings=None, mappings=None, **kwargs):
         if index in self._store.indices_created:
             raise ConflictError("index already exists", meta={"status": 400})

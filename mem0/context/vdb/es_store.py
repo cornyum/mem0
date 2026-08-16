@@ -124,6 +124,28 @@ class ElasticsearchMemoryStore:
         except Exception:
             return False
 
+    def _remove_alias(self, alias: str) -> None:
+        """Best-effort removal of the family alias across all indices.
+
+        ``indices.delete(index=<alias>)`` is not a valid way to remove an
+        alias on ES 8; removing the alias first is what makes a later
+        re-create of a same-named concrete index (legacy layouts that never
+        used aliases) safe.
+        """
+        try:
+            if self.client.indices.exists_alias(name=alias):
+                self.client.indices.delete_alias(index="_all", name=alias)
+        except Exception as exc:
+            logger.warning("Failed to remove alias %s: %s", alias, exc)
+
+    def _remove_index(self, name: str) -> None:
+        """Best-effort removal of one concrete index/data stream."""
+        try:
+            if self.client.indices.exists(index=name):
+                self.client.indices.delete(index=name)
+        except Exception as exc:
+            logger.warning("Failed to remove index %s: %s", name, exc)
+
     def ensure_indices(self) -> None:
         """Create the five backing indices + aliases (idempotent, appendix A)."""
         self._ik = self.detect_ik()
@@ -149,6 +171,10 @@ class ElasticsearchMemoryStore:
                         mappings=mappings,
                     )
                     logger.info("Created ES index %s", index_name)
+                # A legacy concrete index occupying the alias name would make
+                # the alias ``add`` fail with invalid_alias_name_exception.
+                if self.client.indices.exists(index=alias):
+                    self.client.indices.delete(index=alias)
                 self.client.indices.update_aliases(
                     actions=[{"add": {"index": index_name, "alias": alias}}]
                 )
@@ -756,14 +782,13 @@ class ElasticsearchMemoryStore:
     def delete_all(self) -> None:
         """Drop and recreate the five indices (admin reset / e2e from-zero)."""
         for family in FAMILIES:
-            try:
-                self.client.indices.delete(index=self._index_name(family))
-            except Exception:
-                pass
-            try:
-                self.client.indices.delete(index=self.alias(family))
-            except Exception:
-                pass
+            alias = self.alias(family)
+            # Remove alias first: an alias and a same-named concrete index
+            # cannot coexist, and legacy layouts used concrete indices with
+            # the alias names (no ``_v1`` suffix).
+            self._remove_alias(alias)
+            self._remove_index(self._index_name(family))
+            self._remove_index(alias)
         self.ensure_indices()
 
     # -- internals ---------------------------------------------------------------
