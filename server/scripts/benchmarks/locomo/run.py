@@ -610,10 +610,10 @@ def percentile(values, q):
 
 
 def compute_metrics(report):
-    recall_items = report["phases"]["recall"]["items"]
-    answer_errors = len(report["phases"]["answer"].get("errors", []))
-    judge_items = [i for i in report["phases"]["judge"]["items"] if "verdict" in i]
-    judge_errors = len(report["phases"]["judge"].get("errors", []))
+    recall_items = report["phases"].get("recall", {}).get("items", [])
+    answer_errors = len(report["phases"].get("answer", {}).get("errors", []))
+    judge_items = [i for i in report["phases"].get("judge", {}).get("items", []) if "verdict" in i]
+    judge_errors = len(report["phases"].get("judge", {}).get("errors", []))
 
     by_qid = {i["qid"]: i for i in judge_items}
     metrics = {
