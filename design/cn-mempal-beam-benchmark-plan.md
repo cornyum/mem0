@@ -15,7 +15,7 @@
 
 ## 2. v2 基线环境（本次不改变量）
 
-- remember：mode=extract，qwen-plus-latest，ADDITIVE 抽取提示词。
+- remember：mode=extract，qwen-plus-latest，ADDITIVE 抽取提示词；LLM `max_tokens=8000`（v2 默认 2000 会被中文 PAL-Set 单 sample 的 40-60 条事实输出截断——已实测复现 30% sample 得 0 facts，根因确认后通过 `/configure` 调整并验证 sample0 恢复 48 facts）。
 - 中文时间加工：cn-Mem-PAL 全部写入传 `timezone="Asia/Shanghai"`，由服务端做时区解析、日期/星期自洽、动态中文 few-shot；BEAM 沿用 v2 默认（不传 timezone，只传 batch `timestamp`）。
 - recall：mode=auto（semantic kNN + BM25 RRF）+ rerank=true，top_k=50（`/v1/memory/recall` limit 上限 50）。
 - 答题/裁判：qwen-plus-latest，DashScope OpenAI-compatible，temperature=0。
@@ -134,4 +134,5 @@
   - cn-Mem-PAL smoke（user 0000，3 samples，1 topic）：3 remember 全部 200，26 facts 中文日期与星期自洽；相对时间日志（`2024-01-15 16:45 …今天就不吃甜点`）被正确锚到日志行时间戳（`2024年1月15日（星期一）`）；recall hybrid+rerank 正常；requirement judge=2.0/2，solution selection 解析与打分正常。单 sample 摄入约 45-50s。
   - BEAM smoke（conv 1，batch 0 共 12 chunks，1 题）：12 remember 全部 200、94 facts；recall hybrid+rerank 正常；answer/judge 通过（information_extraction 1.0）。单 chunk 摄入约 14s。
   - 发现并修复：`--history-limit/--query-limit` 最初未作用于 ingest（smoke 误吞全量 sample）；已修复并改为逐 user 独立 progress 文件（避免大结果文件每 sample 全量落盘）。
+- [x] 全量前置根因 review（2026-08-16）：首批全量 ingest 出现 30.7% sample 0 facts；逐层复现定位为 LLM `max_tokens=2000` 截断长 JSON（直接调用 DashScope 可稳定返回 47-48 条，服务路径解析一致），`/configure` 调至 8000 后 sample0 恢复 48 facts。已删除 `bench-mempal-v1` 污染数据（head/version/scope/event/dedup 各 11041/45 条）并从零重跑。
 - [ ] 全量结果 review（待执行后回填）。
