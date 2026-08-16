@@ -153,6 +153,16 @@ def parse_args(argv=None):
     parser.add_argument("--no-rerank", dest="rerank", action="store_false")
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--reset", action="store_true", help="POST /reset (or direct ES index delete) before ingest")
+    parser.add_argument(
+        "--ingest-tag",
+        default=None,
+        help="scope tag for ingestion user_ids; defaults to the derived ingest/recall/rerank tag",
+    )
+    parser.add_argument(
+        "--skip-ingest",
+        action="store_true",
+        help="reuse an existing ingestion corpus: skip remember/reset and point questions at --ingest-tag",
+    )
     parser.add_argument("--es-url", default="http://localhost:9200", help="ES fallback for --reset")
     parser.add_argument("--es-prefix", default="agentar_mem0")
     parser.add_argument("--no-answer", action="store_true", help="stop after recall (latency only)")
@@ -167,6 +177,10 @@ def parse_args(argv=None):
         parser.error("--email/--password required (or --no-auth)")
     if not args.no_answer and not resolve_dashscope_key(args.dashscope_key):
         parser.error("DASHSCOPE_API_KEY missing for answer/judge (env or server/.env)")
+    if args.skip_ingest and args.reset:
+        parser.error("--skip-ingest and --reset are mutually exclusive (reset would delete the reused corpus)")
+    if args.skip_ingest and not args.ingest_tag:
+        parser.error("--skip-ingest requires --ingest-tag identifying the existing ingestion scope")
     return args
 
 
@@ -699,6 +713,7 @@ def wait_ready(client, timeout=120.0):
 def main(argv=None):
     args = parse_args(argv)
     tag = f"{args.ingest}-{args.recall_mode}" + ("-rerank" if args.rerank else "-norank")
+    scope_tag = args.ingest_tag or tag
     if not args.out:
         DEFAULT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         args.out = str(DEFAULT_RESULTS_DIR / f"locomo-{tag}-{datetime.now():%Y%m%dT%H%M%S}.json")
@@ -714,6 +729,9 @@ def main(argv=None):
             "recall_mode": args.recall_mode,
             "rerank": args.rerank,
             "top_k": args.top_k,
+            "chunk_size": args.chunk_size,
+            "ingest_scope_tag": scope_tag,
+            "skip_ingest": args.skip_ingest,
             "samples": [s.get("sample_id") for s in dataset],
             "sessions_limit": args.sessions,
             "answer_model": ANSWER_MODEL,
@@ -724,9 +742,11 @@ def main(argv=None):
     }
     if args.resume and Path(args.out).is_file():
         prior = json.loads(Path(args.out).read_text())
+        prior_config = prior.get("config", {})
         if (
-            prior.get("config", {}).get("ingest_mode") == args.ingest
-            and prior["config"].get("recall_mode") == args.recall_mode
+            prior_config.get("ingest_mode") == args.ingest
+            and prior_config.get("recall_mode") == args.recall_mode
+            and prior_config.get("ingest_scope_tag") == scope_tag
         ):
             report = prior
             print(
@@ -742,16 +762,24 @@ def main(argv=None):
     report["config"]["capabilities"] = client.get("/v1/capabilities")
     save(args, report)
 
-    if args.reset and not report["phases"]["ingest"].get("done"):
+    if args.skip_ingest:
+        report["phases"]["ingest"] = {
+            "done": True,
+            "reused_scope_tag": scope_tag,
+            "note": "ingest skipped: recall-only ablation over an existing corpus",
+        }
+        save(args, report)
+        print(f"[ingest] skipped; questions will target locomo_{scope_tag}_*", flush=True)
+    elif args.reset and not report["phases"]["ingest"].get("done"):
         reset_server(client, args)
         wait_ready(client)
 
     if not report["phases"]["ingest"].get("done"):
-        run_ingest(client, dataset, args, tag, report)
+        run_ingest(client, dataset, args, scope_tag, report)
     else:
-        print("[ingest] already done (resume)", flush=True)
+        print("[ingest] already done (resume/skip)", flush=True)
 
-    questions = collect_questions(dataset, args, tag)
+    questions = collect_questions(dataset, args, scope_tag)
     print(f"[plan] {len(questions)} scored questions (categories {EVAL_CATEGORIES})", flush=True)
     if not report["phases"]["recall"].get("done"):
         run_recall(client, questions, args, report)

@@ -7,6 +7,8 @@ loaded by path rather than package import.
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 _RUNNER = Path(__file__).resolve().parents[1] / "server" / "scripts" / "benchmarks" / "locomo" / "run.py"
 
 
@@ -67,3 +69,28 @@ def test_compute_metrics_judges_and_answers():
     assert metrics["accuracy"] == 0.5
     assert metrics["per_category"]["multi_hop"]["total"] == 1
     assert metrics["per_category"]["temporal"]["total"] == 1
+
+
+def test_parse_args_rejects_skip_ingest_without_tag_or_with_reset(capsys):
+    runner = _load_runner()
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--no-auth", "--no-answer", "--skip-ingest"])
+    assert "--skip-ingest requires --ingest-tag" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--no-auth", "--no-answer", "--skip-ingest", "--ingest-tag", "t", "--reset"])
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_collect_questions_targets_ingest_scope_tag():
+    runner = _load_runner()
+    dataset = [
+        {
+            "sample_id": "conv-26",
+            "qa": [{"question": "q?", "answer": "gold", "category": 1}],
+        }
+    ]
+    args = runner.parse_args(["--no-auth", "--no-answer", "--skip-ingest", "--ingest-tag", "corpus-x"])
+    questions = runner.collect_questions(dataset, args, "corpus-x")
+    assert len(questions) == 1
+    assert questions[0]["user_id"] == "locomo_corpus-x_conv-26"
