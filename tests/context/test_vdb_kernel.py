@@ -34,6 +34,7 @@ from mem0.context.vdb import (
     parse_storage_mode,
     validate_vector_store_provider,
 )
+from mem0.context.vdb.service import parse_extraction_facts
 from tests.context.fake_es import FakeElasticsearch
 
 
@@ -146,14 +147,21 @@ def test_embedder_failure_marks_pending_and_keyword_channel_still_finds(service,
 
 class RecordingLLM:
     """Mirrors the mem0 OpenAI-compatible wrapper signature and captures the
-    exact response_format value the extraction path forwards."""
+    exact response_format value and prompt the extraction path forwards."""
 
     def __init__(self, payload='{"facts": ["u1 drinks tea every morning"]}'):
         self.payload = payload
         self.calls = []
 
     def generate_response(self, messages, response_format=None, tools=None, **kwargs):
-        self.calls.append({"response_format": response_format, "tools": tools, "kwargs": kwargs})
+        self.calls.append(
+            {
+                "messages": messages,
+                "response_format": response_format,
+                "tools": tools,
+                "kwargs": kwargs,
+            }
+        )
         return self.payload
 
 
@@ -170,6 +178,111 @@ def test_remember_extract_forwards_json_object_response_format(store):
     # {"response_format": {...}} wrapper — the value must be the format spec itself.
     assert llm.calls[0]["response_format"] == {"type": "json_object"}
     assert result["results"] and result["results"][0]["outcome"] == "created"
+
+
+# -- extraction prompt: temporal grounding + density ----------------------------------
+
+
+def test_remember_extract_uses_additive_prompt_with_observation_date(store):
+    llm = RecordingLLM('{"memory": [{"id": "0", "text": "u1 gave a talk on 3 May 2023"}]}')
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+    timestamp = datetime(2023, 5, 8, tzinfo=timezone.utc).timestamp()
+
+    result = service.remember(
+        messages=[
+            {"role": "user", "content": "Alice: I gave a talk last week."},
+            {"role": "assistant", "content": "Bob: I just adopted a puppy on Saturday."},
+        ],
+        mode="extract",
+        user_id="u1",
+        timestamp=timestamp,
+    )
+
+    assert len(llm.calls) == 1
+    system_prompt = llm.calls[0]["messages"][0]["content"]
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    # The v3 extract path must no longer use the OSS prompt that penalizes
+    # assistant messages; the additive prompt extracts from all speakers.
+    assert "Memory Extractor" in system_prompt
+    assert "DO NOT INCLUDE INFORMATION FROM ASSISTANT OR SYSTEM MESSAGES" not in system_prompt
+    # Relative temporal expressions are anchored to the conversation date, not today.
+    assert "Observation Date" in user_prompt and "2023-05-08" in user_prompt
+    assert '"role": "assistant"' in user_prompt
+    assert result["results"][0]["entry"]["text"] == "u1 gave a talk on 3 May 2023"
+
+
+def test_remember_extract_observation_date_falls_back_to_metadata(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    service.remember(
+        messages=[{"role": "user", "content": "I ran a marathon last week"}],
+        mode="extract",
+        user_id="u1",
+        metadata={"locomo_session": "session_1", "session_date": "1:56 pm on 8 May, 2023"},
+    )
+
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    assert "Observation Date" in user_prompt and "2023-05-08" in user_prompt
+
+
+def test_remember_extract_includes_per_call_prompt_override(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    service.remember(
+        messages=[{"role": "user", "content": "I ran a marathon last week"}],
+        mode="extract",
+        user_id="u1",
+        prompt="Only extract temporal facts",
+    )
+
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    assert "Custom Instructions" in user_prompt and "Only extract temporal facts" in user_prompt
+
+
+def test_remember_extract_rejects_invalid_explicit_timestamp(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    with pytest.raises(ContextValidationError):
+        service.remember(
+            messages=[{"role": "user", "content": "hello"}],
+            mode="extract",
+            user_id="u1",
+            timestamp="not-a-date",
+        )
+    assert llm.calls == []
+
+
+def test_remember_extract_parses_additive_memory_array_and_dedupes(store):
+    llm = RecordingLLM(
+        '{"memory": ['
+        '{"id": "0", "text": "User likes dark mode"},'
+        '{"id": "1", "text": "user likes dark mode"},'
+        '{"id": "2", "text": "User drinks tea every morning"}'
+        "]}"
+    )
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    result = service.remember(
+        messages=[{"role": "user", "content": "I like dark mode and drink tea every morning"}],
+        mode="extract",
+        user_id="u1",
+    )
+
+    stored = [head["text"] for head in store.list_heads({"user_id": "u1"})]
+    assert sorted(stored) == ["User drinks tea every morning", "User likes dark mode"]
+    assert len(result["results"]) == 2
+
+
+def test_parse_extraction_facts_accepts_all_supported_shapes():
+    assert parse_extraction_facts('{"facts": ["a", "b"]}') == ["a", "b"]
+    assert parse_extraction_facts('{"memory": [{"id": "0", "text": "a"}]}') == ["a"]
+    assert parse_extraction_facts('[{"fact": "x"}, {"memory": "y"}]') == ["x", "y"]
+    assert parse_extraction_facts("```json\n{\"memory\": [{\"id\": \"0\", \"text\": \"z\"}]}\n```") == ["z"]
+    assert parse_extraction_facts("<think>reasoning</think>{\"facts\": [\"kept\"]}") == ["kept"]
+    assert parse_extraction_facts("not json") == []
 
 
 def test_published_repair_pending_when_derived_write_fails(store):

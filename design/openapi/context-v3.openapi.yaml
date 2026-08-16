@@ -442,6 +442,22 @@ components:
                 minLength: 1
                 maxLength: 256
               default: []
+            timestamp:
+              nullable: true
+              description: |
+                extract 模式的观察时间锚点：ISO-8601 字符串（如 "2023-05-08"
+                或完整 datetime）或 Unix epoch 秒。用于把 yesterday / last
+                week / next month 归一化为绝对日期。append 模式忽略。
+              oneOf:
+                - type: string
+                  maxLength: 40
+                - type: integer
+                - type: number
+            prompt:
+              type: string
+              nullable: true
+              maxLength: 8192
+              description: 本次调用的抽取补充指令，追加到抽取 prompt 的 Custom Instructions。
             expected_revision:
               type: integer
               nullable: true

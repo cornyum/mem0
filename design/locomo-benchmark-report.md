@@ -20,7 +20,7 @@
 ### 2.2 数据录入（知识加工）
 
 - 接口：`POST /v1/memory/remember`，`mode=extract` + `messages`（LLM 事实抽取管线），`kind=fact`，`categories=["locomo"]`，`metadata` 携带 `sample_id/session/session_date`。
-- 每 session 按 **25 轮/批**切块（`--chunk-size` 可调；官方 runner 为逐轮调用，成本 17 倍，作为后续消融轴）。
+- 每 session 按 **25 轮/批**切块（本报告基线运行值；官方 runner 为逐轮调用，成本 17 倍）。 后续已按 `design/extraction-quality-plan.md` 将 runner 默认值改为 5、补齐 per-batch `timestamp` 并恢复官方角色映射。
 - 消息构造（与官方 runner 的两处**有意差异**，见 §7）：
   1. **双说话人均映射 `role=user`**——OSS 抽取 prompt 明确惩罚 assistant 消息内容，若照搬官方 speaker_b→assistant 映射，一半对话信息会被主动丢弃；
   2. **每轮内容织入 session 绝对日期**（`"Caroline (08 May 2023): ..."`）——session 时间戳只存在于元数据，不进 transcript 则 temporal 事实全部丢失；
@@ -132,7 +132,7 @@ python3 server/scripts/benchmarks/locomo/run.py \
 
 | 轴 | 命令 | 验证假设 |
 |---|---|---|
-| 抽取粒度 | `--chunk-size 1`（或 5/10） | 事实密度↑ → 准确率显著↑（成本 17 倍） |
+| 抽取粒度 | `--chunk-size 1`（runner 默认已改为 5） | 事实密度↑ → 准确率显著↑（chunk 1 成本约 17 倍） |
 | 重排收益 | `--no-rerank` | 717ms→~270ms 延迟换多少准确率 |
 | 召回通道 | `--recall-mode semantic` / `keyword` | RRF 混合增益 |
 | 原文摄取 | `--ingest append` | 知识加工 vs 原文存储的收益 |

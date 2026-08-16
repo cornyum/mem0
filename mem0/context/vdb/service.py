@@ -10,12 +10,18 @@ SQL sidecar.
 import json
 import logging
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError as PydanticValidationError
 
 from mem0.configs.base import MemoryConfig
+from mem0.configs.prompts import (
+    ADDITIVE_EXTRACTION_PROMPT,
+    AGENT_CONTEXT_SUFFIX,
+    generate_additive_extraction_prompt,
+)
 from mem0.context.errors import (
     CapabilityNotSupportedError,
     ContextError,
@@ -36,10 +42,18 @@ from mem0.context.vdb.es_store import ElasticsearchMemoryStore, build_es_client
 from mem0.context.vdb.recall import RecallCoordinator
 from mem0.context.vdb.reconcile import EmbeddingReconciler, RecoveryReconciler
 from mem0.context.vdb.write import WriteCoordinator
+from mem0.memory.utils import extract_json, remove_code_blocks
 
 logger = logging.getLogger(__name__)
 
 MAX_QUERY_BYTES = 32 * 1024
+
+# Metadata keys that can provide the conversation observation date when the
+# explicit ``timestamp`` argument is absent (backwards-compatible fallback).
+_OBSERVATION_DATE_METADATA_KEYS = ("session_date", "observation_date", "timestamp", "created_at")
+
+# Covers LOCOMO's ``"1:56 pm on 8 May, 2023"`` session timestamp format.
+_NAMED_DATE_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})\b")
 
 
 def translate_es_errors(fn):
@@ -66,8 +80,6 @@ def translate_es_errors(fn):
 
 
 def _normalize_text(text: str) -> str:
-    import unicodedata
-
     if not isinstance(text, str):
         raise ContextValidationError("text must be a string")
     normalized = unicodedata.normalize("NFC", text).strip()
@@ -88,35 +100,127 @@ def _messages_to_transcript(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def parse_extraction_facts(raw: str) -> List[str]:
-    """Parse the extraction LLM's JSON facts payload tolerantly."""
-    if not raw:
-        return []
-    text = raw.strip()
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}|\[.*\]", text, re.DOTALL)
-        if not match:
-            return []
+def _coerce_observation_date(value: Any) -> str:
+    """Normalize an observation time to a ``YYYY-MM-DD`` date string.
+
+    Accepts ISO-8601 strings (including full datetimes), Unix epoch seconds,
+    and named dates such as ``"1:56 pm on 8 May, 2023"``. Raises
+    ContextValidationError for an explicit-but-unparsable value: silently
+    substituting today would quietly corrupt temporal semantics.
+    """
+    if isinstance(value, bool):
+        raise ContextValidationError(f"timestamp must be an ISO-8601 string or epoch seconds, got {type(value).__name__}")
+
+    if isinstance(value, (int, float)):
         try:
-            payload = json.loads(match.group(0))
+            return datetime.fromtimestamp(value, tz=timezone.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError) as exc:
+            raise ContextValidationError(f"timestamp epoch seconds could not be parsed: {value!r}") from exc
+
+    if not isinstance(value, str):
+        raise ContextValidationError(f"timestamp must be an ISO-8601 string or epoch seconds, got {type(value).__name__}")
+
+    text = value.strip()
+    if not text:
+        raise ContextValidationError("timestamp must not be empty")
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+        except ValueError as exc:
+            raise ContextValidationError(f"timestamp date could not be parsed: {value!r}") from exc
+
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        pass
+
+    match = _NAMED_DATE_RE.search(text)
+    if match:
+        day, month, year = match.groups()
+        for date_format in ("%d %B %Y", "%d %b %Y"):
+            try:
+                return datetime.strptime(f"{day} {month} {year}", date_format).date().isoformat()
+            except ValueError:
+                continue
+
+    try:
+        return datetime.fromtimestamp(float(text), tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        pass
+
+    raise ContextValidationError(
+        f"timestamp could not be parsed as ISO-8601, epoch seconds, or named date: {value!r}"
+    )
+
+
+def _resolve_observation_date(timestamp: Optional[Any], metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Pick the extraction observation date: explicit arg first, then metadata.
+
+    Metadata fallback failures are ignored (a caller putting arbitrary data in
+    metadata must not break extraction), but an explicit bad timestamp is a
+    422 validation error from ``_coerce_observation_date``.
+    """
+    if timestamp is not None:
+        return _coerce_observation_date(timestamp)
+    for key in _OBSERVATION_DATE_METADATA_KEYS:
+        value = (metadata or {}).get(key)
+        if value is None:
+            continue
+        try:
+            return _coerce_observation_date(value)
+        except ContextValidationError:
+            continue
+    return None
+
+
+def _extraction_fact_text(fact: Any) -> Optional[str]:
+    if isinstance(fact, str):
+        return fact
+    if isinstance(fact, dict):
+        value = fact.get("text") or fact.get("memory") or fact.get("fact")
+        return value if isinstance(value, str) else None
+    return str(fact)
+
+
+def parse_extraction_facts(raw: str) -> List[str]:
+    """Parse the extraction LLM's JSON payload tolerantly.
+
+    Supports the additive ``{"memory": [{"id": "0", "text": ...}]}`` shape,
+    the legacy ``{"facts": [...]}`` shape, top-level lists, code fences and
+    ``<think>`` remnants. Batch-internal duplicates are dropped in order.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+
+    text = remove_code_blocks(raw)
+    try:
+        payload = json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        try:
+            payload = json.loads(extract_json(text), strict=False)
         except json.JSONDecodeError:
             return []
+
     if isinstance(payload, dict):
-        facts = payload.get("facts") or []
+        facts = payload.get("memory") or payload.get("facts") or []
     elif isinstance(payload, list):
         facts = payload
     else:
         return []
-    out = []
+
+    out: List[str] = []
+    seen = set()
     for fact in facts:
-        if isinstance(fact, str) and fact.strip():
-            out.append(fact.strip())
-        elif isinstance(fact, dict):
-            text_value = fact.get("text") or fact.get("memory")
-            if isinstance(text_value, str) and text_value.strip():
-                out.append(text_value.strip())
+        fact_text = _extraction_fact_text(fact)
+        if not fact_text or not fact_text.strip():
+            continue
+        fact_text = unicodedata.normalize("NFC", fact_text).strip()
+        dedup_key = fact_text.casefold()
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        out.append(fact_text)
     return out
 
 
@@ -271,12 +375,17 @@ class MemoryApplicationService:
         metadata: Optional[Dict[str, Any]] = None,
         expires_at: Optional[str] = None,
         prompt: Optional[str] = None,
+        timestamp: Optional[Any] = None,
         expected_revision: Optional[int] = None,
         **ids: Optional[str],
     ) -> Dict[str, Any]:
         """Unified write. append → one zero-LLM candidate; extract → LLM over
         ``messages`` producing 0..N candidates, each published individually;
-        auto routes text→append and messages→extract (design §5.1)."""
+        auto routes text→append and messages→extract (design §5.1).
+
+        ``timestamp`` anchors relative time expressions during extraction
+        (ISO-8601 string or Unix epoch seconds); it is ignored for append.
+        """
         if mode not in ("auto", "append", "extract"):
             raise ContextValidationError(f"mode must be auto|append|extract, got {mode!r}")
 
@@ -290,6 +399,7 @@ class MemoryApplicationService:
                 source_refs=source_refs or [],
                 artifact_refs=artifact_refs or [],
                 metadata=metadata,
+                timestamp=timestamp,
                 expected_revision=expected_revision,
                 prompt_override=prompt,
             )
@@ -321,6 +431,7 @@ class MemoryApplicationService:
         metadata: Optional[Dict[str, Any]],
         expected_revision: Optional[int],
         prompt_override: Optional[str] = None,
+        timestamp: Optional[Any] = None,
     ) -> Dict[str, Any]:
         if self.llm is None:
             raise CapabilityNotSupportedError("extract")
@@ -330,16 +441,27 @@ class MemoryApplicationService:
         if not transcript.strip():
             raise ContextValidationError("messages contain no textual content")
 
-        from mem0.memory.utils import get_fact_retrieval_messages
+        observation_date = _resolve_observation_date(timestamp, metadata)
+        # Platform-aligned additive extraction: all speakers contribute, every
+        # distinct topic gets a memory, and relative time references are
+        # normalized against the Observation Date (design extraction-quality-plan).
+        is_agent_scoped = bool(scope.fields.get("agent_id")) and not scope.fields.get("user_id")
+        system_prompt = ADDITIVE_EXTRACTION_PROMPT
+        if is_agent_scoped:
+            system_prompt += AGENT_CONTEXT_SUFFIX
 
-        system_prompt, user_prompt = get_fact_retrieval_messages(transcript)
-        # deployment taxonomy/custom instructions and the per-call legacy
-        # ``prompt`` override must actually reach the extraction LLM
+        # Deployment taxonomy/custom instructions and the per-call ``prompt``
+        # override must actually reach the extraction LLM.
         extra = self.custom_instructions or ""
         if prompt_override:
             extra = f"{extra}\n\n{prompt_override}" if extra else prompt_override
-        if extra:
-            system_prompt = f"{system_prompt}\n\n{extra}"
+
+        user_prompt = generate_additive_extraction_prompt(
+            new_messages=messages,
+            timestamp=observation_date,
+            custom_instructions=extra or None,
+            use_input_language=True,
+        )
         response = self.llm.generate_response(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             response_format={"type": "json_object"},

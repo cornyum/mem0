@@ -124,6 +124,31 @@ def test_extract_via_messages(client):
     assert results[0]["entry"]["text"] == "用户喜欢简洁的回复"
 
 
+def test_extract_forwards_timestamp_and_prompt(client, monkeypatch):
+    """The router must not drop the temporal anchor or per-call prompt."""
+    captured = {}
+
+    class StubService:
+        def remember(self, *args, **kwargs):
+            captured.update(kwargs)
+            return {"results": []}
+
+    monkeypatch.setattr("routers.context_router.get_app_service", lambda: StubService())
+    response = client.post(
+        "/v1/memory/remember",
+        json={
+            "user_id": "u1",
+            "mode": "extract",
+            "messages": [{"role": "user", "content": "I ran a marathon last week"}],
+            "timestamp": "2023-05-08",
+            "prompt": "Only extract temporal facts",
+        },
+    )
+    assert response.status_code == 200
+    assert captured["timestamp"] == "2023-05-08"
+    assert captured["prompt"] == "Only extract temporal facts"
+
+
 def test_cas_conflict_is_409_with_code(client):
     _remember(client, "第一条")
     response = client.post(

@@ -3,8 +3,9 @@
 
 Full official-protocol pipeline (category 1-4 scored, category 5 excluded):
 
-- ingest : each session (25 turns/batch) -> POST /v1/memory/remember
-           (mode=extract, LLM knowledge processing), one scope per
+- ingest : each session (5 turns/batch by default; --chunk-size 1 mirrors the
+           official runner) -> POST /v1/memory/remember (mode=extract, LLM
+           knowledge processing, timestamp=session date), one scope per
            conversation: user_id = locomo_{ingest_tag}_{sample_id}.
 - recall : every scored QA -> POST /v1/memory/recall (mode auto/semantic/
            keyword, optional rerank), sequential for latency fidelity.
@@ -132,7 +133,20 @@ def parse_args(argv=None):
     parser.add_argument("--sessions", type=int, default=0, help="first N sessions per conversation (0 = all)")
     parser.add_argument("--ingest", choices=("extract", "append"), default="extract")
     parser.add_argument(
-        "--chunk-size", type=int, default=25, help="turns per remember-extract batch (official runner uses 1)"
+        "--chunk-size", type=int, default=5, help="turns per remember-extract batch (official runner uses 1)"
+    )
+    parser.add_argument(
+        "--inline-session-date",
+        dest="inline_session_date",
+        action="store_true",
+        default=True,
+        help="weave the session date into each turn's content (default); --no-inline-session-date relies on timestamp only",
+    )
+    parser.add_argument(
+        "--no-inline-session-date",
+        dest="inline_session_date",
+        action="store_false",
+        help="do not weave the session date into turn content; pass it as the remember timestamp instead",
     )
     parser.add_argument("--recall-mode", choices=("auto", "semantic", "keyword"), default="auto")
     parser.add_argument("--rerank", dest="rerank", action="store_true", default=True)
@@ -276,22 +290,37 @@ def date_display(parsed, date_raw):
     return parsed.strftime("%d %B %Y") if parsed else (date_raw or "").strip()
 
 
-def build_messages(turns, parsed_date, date_raw):
-    """Both speakers map to role=user: the OSS extraction prompt penalizes
-    assistant-message content, and LOCOMO questions cover both speakers. The
-    session date is woven into each turn so temporal facts stay bound."""
+def build_messages(turns, parsed_date, date_raw, speaker_a, inline_date=True):
+    """Official runner role mapping: speaker_a -> user, everyone else assistant.
+
+    The v3 extract prompt (ADDITIVE pipeline) extracts from BOTH roles, so the
+    old "double user" workaround for the OSS assistant-penalizing prompt is no
+    longer needed. The session date is optionally woven into each turn and is
+    always available separately as the remember ``timestamp``.
+    """
     stamp = date_display(parsed_date, date_raw)
-    prefix = f" ({stamp})" if stamp else ""
-    return [
-        {"role": "user", "content": f"{turn.get('speaker', '?')}{prefix}: {turn_text(turn)}"}
-        for turn in turns
-        if turn_text(turn)
-    ]
+    prefix = f" ({stamp})" if stamp and inline_date else ""
+    messages = []
+    for turn in turns:
+        content = turn_text(turn)
+        if not content:
+            continue
+        role = "user" if not speaker_a or turn.get("speaker") == speaker_a else "assistant"
+        messages.append({"role": role, "content": f"{turn.get('speaker', '?')}{prefix}: {content}"})
+    return messages
+
+
+def observation_date(parsed, date_raw):
+    """ISO observation date for the remember timestamp."""
+    if parsed:
+        return parsed.strftime("%Y-%m-%d")
+    return (date_raw or "").strip() or None
 
 
 def ingest_sample(client, sample, args, tag):
     sample_id = sample.get("sample_id")
     conv = sample["conversation"]
+    speaker_a = conv.get("speaker_a")
     user_id = f"locomo_{tag}_{sample_id}"
     sessions = iter_sessions(conv)
     if args.sessions:
@@ -304,7 +333,16 @@ def ingest_sample(client, sample, args, tag):
             units = [{"text": f"{t.get('speaker', '?')}{prefix}: {turn_text(t)}"} for t in turns if turn_text(t)]
         else:
             units = [
-                {"messages": build_messages(turns[i : i + args.chunk_size], parsed, date_raw)}
+                {
+                    "messages": build_messages(
+                        turns[i : i + args.chunk_size],
+                        parsed,
+                        date_raw,
+                        speaker_a,
+                        inline_date=args.inline_session_date,
+                    ),
+                    "timestamp": observation_date(parsed, date_raw),
+                }
                 for i in range(0, len(turns), args.chunk_size)
             ]
         units = [u for u in units if u.get("messages") or u.get("text")]

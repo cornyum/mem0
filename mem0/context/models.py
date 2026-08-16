@@ -116,6 +116,18 @@ class RememberRequest(ScopeParams):
     metadata: Optional[dict] = None
     expires_at: Optional[str] = Field(default=None, max_length=40)
     mode: str = Field(default="auto", pattern="^(auto|append|extract)$")
+    timestamp: str | int | float | None = Field(
+        default=None,
+        description=(
+            "Observation time for extract mode (ISO-8601 string or Unix epoch seconds). "
+            "Grounds relative time expressions such as 'yesterday' or 'last week'."
+        ),
+    )
+    prompt: Optional[str] = Field(
+        default=None,
+        max_length=8192,
+        description="Per-call extraction instructions appended to the extraction prompt.",
+    )
     expected_revision: Optional[int] = Field(default=None, ge=0)
 
 
