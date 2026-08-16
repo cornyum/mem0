@@ -1,5 +1,7 @@
 # LOCOMO × v3 `/v1/memory/*` 评测基准报告
 
+> **v2 已完成**：抽取管线升级后的同口径结果见 [`design/locomo-benchmark-v2-report.md`](locomo-benchmark-v2-report.md)（总体 33.3% → 72.7%，temporal 16.5% → 75.7%）。本文件保留为 v1 历史基线。
+
 > 运行日期：2026-08-16 · 代码基线：`feature/memory-research` @ `e7c7093b` + 本次评测提交
 > 结果文件：`server/scripts/benchmarks/locomo/results/full-extract-auto-rerank.json`（每题明细可回溯）
 
