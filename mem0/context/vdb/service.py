@@ -342,7 +342,7 @@ class MemoryApplicationService:
             system_prompt = f"{system_prompt}\n\n{extra}"
         response = self.llm.generate_response(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            {"response_format": {"type": "json_object"}},
+            response_format={"type": "json_object"},
         )
         facts = parse_extraction_facts(response)
 

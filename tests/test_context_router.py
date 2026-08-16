@@ -41,7 +41,7 @@ class RouterEmbedder:
 class RouterLLM:
     """Deterministic extraction stub returning one fact."""
 
-    def generate_response(self, messages, _format=None):
+    def generate_response(self, messages, response_format=None):
         return '{"facts": ["用户喜欢简洁的回复"]}'
 
 

@@ -144,6 +144,34 @@ def test_embedder_failure_marks_pending_and_keyword_channel_still_finds(service,
     assert out["results"][0]["matched_by"] == ["keyword"]
 
 
+class RecordingLLM:
+    """Mirrors the mem0 OpenAI-compatible wrapper signature and captures the
+    exact response_format value the extraction path forwards."""
+
+    def __init__(self, payload='{"facts": ["u1 drinks tea every morning"]}'):
+        self.payload = payload
+        self.calls = []
+
+    def generate_response(self, messages, response_format=None, tools=None, **kwargs):
+        self.calls.append({"response_format": response_format, "tools": tools, "kwargs": kwargs})
+        return self.payload
+
+
+def test_remember_extract_forwards_json_object_response_format(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+    result = service.remember(
+        messages=[{"role": "user", "content": "u1: I drink tea every morning"}],
+        mode="extract",
+        user_id="u1",
+    )
+    assert len(llm.calls) == 1
+    # OpenAI-compatible backends (DashScope included) reject a nested
+    # {"response_format": {...}} wrapper — the value must be the format spec itself.
+    assert llm.calls[0]["response_format"] == {"type": "json_object"}
+    assert result["results"] and result["results"][0]["outcome"] == "created"
+
+
 def test_published_repair_pending_when_derived_write_fails(store):
     service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=None)
     es = store.client

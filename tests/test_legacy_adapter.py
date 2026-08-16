@@ -29,7 +29,7 @@ class LegacyEmbedder:
 
 
 class LegacyLLM:
-    def generate_response(self, messages, _format=None):
+    def generate_response(self, messages, response_format=None):
         return '{"facts": ["用户喜欢绿茶", "用户住在杭州"]}'
 
 
