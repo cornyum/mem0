@@ -136,4 +136,7 @@
   - BEAM smoke（conv 1，batch 0 共 12 chunks，1 题）：12 remember 全部 200、94 facts；recall hybrid+rerank 正常；answer/judge 通过（information_extraction 1.0）。单 chunk 摄入约 14s。
   - 发现并修复：`--history-limit/--query-limit` 最初未作用于 ingest（smoke 误吞全量 sample）；已修复并改为逐 user 独立 progress 文件（避免大结果文件每 sample 全量落盘）。
 - [x] 全量前置根因 review（2026-08-16）：首批全量 ingest 出现 30.7% sample 0 facts；逐层复现定位为 LLM `max_tokens=2000` 截断长 JSON（直接调用 DashScope 可稳定返回 47-48 条，服务路径解析一致），`/configure` 调至 8000 后 sample0 恢复 48 facts。已删除 `bench-mempal-v1` 污染数据（head/version/scope/event/dedup 各 11041/45 条）并从零重跑。
-- [ ] 全量结果 review（待执行后回填）。
+- [x] 全量结果 review（2026-08-17 完成，详见 `design/cn-mempal-beam-benchmark-report.md`）：
+  - cn-Mem-PAL v1：2890 remember / 118,363 facts / 0 errors / 0 空抽取；requirement score 84.35/100（满分率 67.1%，≥1 分 94.3%）；solution selection 54.78/100（精确双 pos 33.1%，≥1 pos 89.8%）；recall hybrid+rerank applied，p50 1353.7ms。
+  - BEAM v1（100K 全量）：1181 chunks / 7,813 facts / 0 errors；400 题 accuracy 58.0%、avg 0.5329；preference 97.5% / instruction 87.5% / information_extraction 82.5% 为强项，summarization 27.5% / event_ordering 25.0% 为短板。
+  - 日志观察：remember/recall 全部 200（3 次 JWT 401 自动重登恢复），ES 五索引读写无错误；`max_tokens=8000` 修复后全量 0-fact 率 0%。
