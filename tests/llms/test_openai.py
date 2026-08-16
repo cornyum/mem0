@@ -287,6 +287,38 @@ def test_store_sent_when_explicitly_false(mock_openai_client):
     assert call_kwargs["store"] is False
 
 
+def test_extra_body_not_sent_by_default(mock_openai_client):
+    """`extra_body` is opt-in and must not leak into OpenAI-compatible backends."""
+    config = OpenAIConfig(model="gpt-4.1-nano-2025-04-14")
+    assert config.extra_body is None
+    llm = OpenAILLM(config)
+    messages = [{"role": "user", "content": "Hello"}]
+
+    mock_response = Mock()
+    mock_response.choices = [Mock(message=Mock(content="Response"))]
+    mock_openai_client.chat.completions.create.return_value = mock_response
+
+    llm.generate_response(messages)
+
+    call_kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
+    assert "extra_body" not in call_kwargs
+
+
+def test_extra_body_sent_when_configured(mock_openai_client):
+    config = OpenAIConfig(model="deepseek-v4-flash-0731", extra_body={"enable_thinking": False})
+    llm = OpenAILLM(config)
+    messages = [{"role": "user", "content": "Hello"}]
+
+    mock_response = Mock()
+    mock_response.choices = [Mock(message=Mock(content="Response"))]
+    mock_openai_client.chat.completions.create.return_value = mock_response
+
+    llm.generate_response(messages)
+
+    call_kwargs = mock_openai_client.chat.completions.create.call_args.kwargs
+    assert call_kwargs["extra_body"] == {"enable_thinking": False}
+
+
 def test_gpt5_mini_not_classified_as_reasoning(mock_openai_client):
     """Test that gpt-5.4-mini is NOT treated as a reasoning model.
 

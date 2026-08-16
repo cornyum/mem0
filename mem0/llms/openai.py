@@ -32,6 +32,7 @@ class OpenAILLM(LLMBase):
                 reasoning_effort=getattr(config, 'reasoning_effort', None),
                 http_client_proxies=config.http_client_proxies,
                 is_reasoning_model=getattr(config, 'is_reasoning_model', None),
+                extra_body=getattr(config, 'extra_body', None),
             )
 
         super().__init__(config)
@@ -129,9 +130,11 @@ class OpenAILLM(LLMBase):
         else:
             # Only send OpenAI-specific parameters when the user has explicitly
             # configured them. OpenAI-compatible backends (Gemini, Groq, vLLM, etc.)
-            # reject unknown fields, so `store` must be opt-in, not opt-out.
+            # reject unknown fields, so `store`/`extra_body` are opt-in.
             if self.config.store is not None:
                 params["store"] = self.config.store
+            if self.config.extra_body is not None:
+                params["extra_body"] = self.config.extra_body
 
         if response_format:
             params["response_format"] = response_format

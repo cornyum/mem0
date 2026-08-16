@@ -1,4 +1,4 @@
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from mem0.configs.llms.base import BaseLlmConfig
 
@@ -31,6 +31,7 @@ class OpenAIConfig(BaseLlmConfig):
         site_url: Optional[str] = None,
         app_name: Optional[str] = None,
         store: Optional[bool] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
         # Response monitoring callback
         response_callback: Optional[Callable[[Any, dict, dict], None]] = None,
     ):
@@ -62,6 +63,10 @@ class OpenAIConfig(BaseLlmConfig):
                 want the value forwarded to the OpenAI API. Leaving it None
                 avoids leaking the field into OpenAI-compatible backends that
                 reject unknown fields (Gemini, Groq, vLLM, etc.).
+            extra_body: Optional provider-specific request body forwarded via
+                the OpenAI client's ``extra_body`` parameter (e.g.
+                ``{"enable_thinking": false}`` for DashScope DeepSeek models).
+                Opt-in; None means the field is not sent.
             response_callback: Optional callback for monitoring LLM responses.
         """
         # Initialize base parameters
@@ -87,6 +92,7 @@ class OpenAIConfig(BaseLlmConfig):
         self.site_url = site_url
         self.app_name = app_name
         self.store = store
+        self.extra_body = extra_body
 
         # Response monitoring
         self.response_callback = response_callback
