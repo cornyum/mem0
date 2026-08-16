@@ -519,6 +519,40 @@ async def test_async_add_metadata_cannot_set_identity_fields(mocker):
     assert captured["category"] == "sports"
 
 
+def test_add_forwards_timezone_to_vector_store_pipeline(mocker):
+    memory = _build_memory_instance(mocker, Memory)
+    captured = {}
+
+    def _capture(messages, metadata, filters, infer, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    mocker.patch.object(memory, "_add_to_vector_store", side_effect=_capture)
+    mocker.patch("mem0.memory.main.parse_vision_messages", lambda msgs, *a, **k: msgs)
+    mocker.patch("mem0.memory.main.display_first_run_notice", lambda *a, **k: None)
+
+    memory.add("上周三 7 点我去机场接妈妈。", user_id="u1", timezone="Asia/Shanghai")
+
+    assert captured["timezone_spec"] == "Asia/Shanghai"
+
+
+@pytest.mark.asyncio
+async def test_async_add_forwards_timezone_to_vector_store_pipeline(mocker):
+    memory = _build_memory_instance(mocker, AsyncMemory)
+    captured = {}
+
+    async def _capture(messages, metadata, filters, infer, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    mocker.patch.object(memory, "_add_to_vector_store", side_effect=_capture)
+    mocker.patch("mem0.memory.main.parse_vision_messages", lambda msgs, *a, **k: msgs)
+
+    await memory.add("上周三 7 点我去机场接妈妈。", user_id="u1", timezone="Asia/Shanghai")
+
+    assert captured["timezone_spec"] == "Asia/Shanghai"
+
+
 def test_add_entity_params_still_set_scope(mocker):
     """The documented top-level params remain the only way to set scope."""
     memory = _build_memory_instance(mocker, Memory)

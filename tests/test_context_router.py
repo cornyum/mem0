@@ -125,7 +125,7 @@ def test_extract_via_messages(client):
 
 
 def test_extract_forwards_timestamp_and_prompt(client, monkeypatch):
-    """The router must not drop the temporal anchor or per-call prompt."""
+    """The router must not drop the temporal anchor, timezone, or per-call prompt."""
     captured = {}
 
     class StubService:
@@ -141,11 +141,13 @@ def test_extract_forwards_timestamp_and_prompt(client, monkeypatch):
             "mode": "extract",
             "messages": [{"role": "user", "content": "I ran a marathon last week"}],
             "timestamp": "2023-05-08",
+            "timezone": "Asia/Shanghai",
             "prompt": "Only extract temporal facts",
         },
     )
     assert response.status_code == 200
     assert captured["timestamp"] == "2023-05-08"
+    assert captured["timezone"] == "Asia/Shanghai"
     assert captured["prompt"] == "Only extract temporal facts"
 
 

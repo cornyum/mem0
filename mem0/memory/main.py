@@ -804,6 +804,7 @@ class Memory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
+        timezone: Optional[str] = None,
     ):
         """
         Create a new memory.
@@ -832,6 +833,9 @@ class Memory(MemoryBase):
                 creating procedural memories (typically requires 'agent_id'). Otherwise, memories
                 are treated as general conversational/factual memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
+            timezone (str, optional): IANA timezone name ("Asia/Shanghai") or UTC offset ("+08:00")
+                used to render the observation date/weekday in the extraction prompt.
+                Defaults to the system local timezone. Stored metadata ``timezone`` is used as fallback.
 
         Note:
             `search()` and `get_all()` scope queries via `filters={"user_id": "...", "agent_id": "...", "run_id": "...", "tenant_id": "...", "session_id": "..."}` —
@@ -905,7 +909,13 @@ class Memory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        effective_timezone = timezone if timezone is not None else (metadata or {}).get("timezone")
+        add_kwargs = {}
+        if effective_timezone is not None:
+            add_kwargs["timezone_spec"] = effective_timezone
+        vector_store_result = self._add_to_vector_store(
+            messages, processed_metadata, effective_filters, infer, prompt=prompt, **add_kwargs
+        )
         scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
@@ -915,7 +925,7 @@ class Memory(MemoryBase):
             display_first_run_notice(self, "sync", "add")
         return {"results": vector_store_result}
 
-    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None, timezone_spec=None):
         if not infer:
             returned_memories = []
             for message_dict in messages:
@@ -989,6 +999,8 @@ class Memory(MemoryBase):
             new_messages=parsed_messages,
             last_k_messages=last_messages,
             custom_instructions=custom_instr,
+            timezone=timezone_spec,
+            use_input_language=True,
         )
 
         try:
@@ -2596,6 +2608,7 @@ class AsyncMemory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
+        timezone: Optional[str] = None,
         llm=None,
     ):
         """
@@ -2616,6 +2629,8 @@ class AsyncMemory(MemoryBase):
             memory_type (str, optional): Type of memory to create. Defaults to None.
                                          Pass "procedural_memory" to create procedural memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
+            timezone (str, optional): IANA timezone name or UTC offset used for the observation
+                date/weekday in the extraction prompt. Defaults to the system local timezone.
             llm (BaseChatModel, optional): LLM class to use for generating procedural memories. Defaults to None. Useful when user is using LangChain ChatModel.
 
         Note:
@@ -2675,7 +2690,13 @@ class AsyncMemory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        effective_timezone = timezone if timezone is not None else (metadata or {}).get("timezone")
+        add_kwargs = {}
+        if effective_timezone is not None:
+            add_kwargs["timezone_spec"] = effective_timezone
+        vector_store_result = await self._add_to_vector_store(
+            messages, processed_metadata, effective_filters, infer, prompt=prompt, **add_kwargs
+        )
         scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
@@ -2692,6 +2713,7 @@ class AsyncMemory(MemoryBase):
         effective_filters: dict,
         infer: bool,
         prompt: Optional[str] = None,
+        timezone_spec: Optional[str] = None,
     ):
         if not infer:
             returned_memories = []
@@ -2767,6 +2789,8 @@ class AsyncMemory(MemoryBase):
             new_messages=parsed_messages,
             last_k_messages=last_messages,
             custom_instructions=custom_instr,
+            timezone=timezone_spec,
+            use_input_language=True,
         )
 
         try:

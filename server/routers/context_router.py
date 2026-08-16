@@ -97,6 +97,7 @@ def remember(req: RememberRequest, _auth=Depends(verify_auth)):
         expires_at=req.expires_at,
         prompt=req.prompt,
         timestamp=req.timestamp,
+        timezone=req.timezone,
         expected_revision=req.expected_revision,
         **req.identity_kwargs(),
     )

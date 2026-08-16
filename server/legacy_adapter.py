@@ -113,6 +113,7 @@ class LegacyMemoryAdapter:
         expiration_date: Optional[str] = None,
         prompt: Optional[str] = None,
         memory_type: Optional[str] = None,
+        timezone: Optional[str] = None,
         **ids: Optional[str],
     ) -> Dict[str, Any]:
         """Legacy create: infer=false → remember(append) of the raw last user
@@ -129,6 +130,7 @@ class LegacyMemoryAdapter:
                 metadata=payload_metadata or None,
                 expires_at=self._expires_at(expiration_date),
                 prompt=prompt,
+                timezone=timezone,
                 **ids,
             )
             results = [

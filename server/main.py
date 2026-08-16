@@ -44,6 +44,7 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select
 
 from mem0.exceptions import ValidationError as Mem0ValidationError
+from mem0.context.errors import ContextValidationError
 
 load_dotenv()
 
@@ -341,6 +342,9 @@ class MemoryCreate(BaseModel):
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+    timezone: Optional[str] = Field(
+        None, description="IANA timezone name or UTC offset for observation-time anchoring. Defaults to system local timezone."
+    )
 
 
 class MemoryUpdate(BaseModel):
@@ -572,7 +576,7 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
         return JSONResponse(content=response)
-    except (ValueError, Mem0ValidationError) as e:
+    except (ValueError, Mem0ValidationError, ContextValidationError) as e:
         raise _client_error(e)
     except Exception:
         raise upstream_error()

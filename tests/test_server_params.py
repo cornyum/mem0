@@ -275,6 +275,33 @@ class TestAddPrompt:
 
 
 # ===========================================================================
+# MemoryCreate: timezone parameter
+# ===========================================================================
+
+class TestAddTimezone:
+    """Verify that the timezone parameter is accepted and forwarded."""
+
+    def test_timezone_forwarded(self, client, mock_memory):
+        resp = client.post("/memories", json={
+            "messages": [{"role": "user", "content": "上周三 7 点我去机场。"}],
+            "user_id": "u1",
+            "timezone": "Asia/Shanghai",
+        })
+        assert resp.status_code == 200
+        _, kwargs = mock_memory.add.call_args
+        assert kwargs["timezone"] == "Asia/Shanghai"
+
+    def test_timezone_omitted(self, client, mock_memory):
+        resp = client.post("/memories", json={
+            "messages": [{"role": "user", "content": "hello"}],
+            "user_id": "u1",
+        })
+        assert resp.status_code == 200
+        _, kwargs = mock_memory.add.call_args
+        assert "timezone" not in kwargs
+
+
+# ===========================================================================
 # MemoryCreate: all new params together
 # ===========================================================================
 
@@ -412,6 +439,11 @@ class TestOpenAPISchema:
         schema = client.get("/openapi.json").json()
         add_props = schema["components"]["schemas"]["MemoryCreate"]["properties"]
         assert "prompt" in add_props
+
+    def test_add_schema_includes_timezone(self, client):
+        schema = client.get("/openapi.json").json()
+        add_props = schema["components"]["schemas"]["MemoryCreate"]["properties"]
+        assert "timezone" in add_props
 
 
 # ===========================================================================

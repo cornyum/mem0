@@ -9,7 +9,6 @@ SQL sidecar.
 
 import json
 import logging
-import re
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -43,6 +42,7 @@ from mem0.context.vdb.recall import RecallCoordinator
 from mem0.context.vdb.reconcile import EmbeddingReconciler, RecoveryReconciler
 from mem0.context.vdb.write import WriteCoordinator
 from mem0.memory.utils import extract_json, remove_code_blocks
+from mem0.utils.temporal import coerce_observation_datetime, resolve_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +51,7 @@ MAX_QUERY_BYTES = 32 * 1024
 # Metadata keys that can provide the conversation observation date when the
 # explicit ``timestamp`` argument is absent (backwards-compatible fallback).
 _OBSERVATION_DATE_METADATA_KEYS = ("session_date", "observation_date", "timestamp", "created_at")
-
-# Covers LOCOMO's ``"1:56 pm on 8 May, 2023"`` session timestamp format.
-_NAMED_DATE_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})\b")
+_TIMEZONE_METADATA_KEYS = ("timezone", "time_zone", "tz")
 
 
 def translate_es_errors(fn):
@@ -100,61 +98,54 @@ def _messages_to_transcript(messages: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _coerce_observation_date(value: Any) -> str:
+def _coerce_observation_date(value: Any, timezone_spec: Any = None) -> str:
     """Normalize an observation time to a ``YYYY-MM-DD`` date string.
 
     Accepts ISO-8601 strings (including full datetimes), Unix epoch seconds,
-    and named dates such as ``"1:56 pm on 8 May, 2023"``. Raises
-    ContextValidationError for an explicit-but-unparsable value: silently
-    substituting today would quietly corrupt temporal semantics.
+    and named dates such as ``"1:56 pm on 8 May, 2023"``. ``timezone_spec``
+    selects the calendar in which the date is rendered; ``None`` means the
+    system local timezone. Raises ContextValidationError for an
+    explicit-but-unparsable value: silently substituting today would quietly
+    corrupt temporal semantics.
     """
-    if isinstance(value, bool):
-        raise ContextValidationError(f"timestamp must be an ISO-8601 string or epoch seconds, got {type(value).__name__}")
+    try:
+        tz = resolve_timezone(timezone_spec)
+        return coerce_observation_datetime(value, tz).date().isoformat()
+    except ValueError as exc:
+        raise ContextValidationError(str(exc)) from exc
 
-    if isinstance(value, (int, float)):
+
+def _resolve_observation_timezone(
+    timezone_spec: Optional[Any], metadata: Optional[Dict[str, Any]]
+) -> Optional[Any]:
+    """Explicit timezone wins; metadata timezone is a best-effort fallback.
+
+    An invalid explicit timezone is a validation error. An invalid metadata
+    timezone is ignored so unrelated metadata never breaks extraction.
+    ``None`` is returned when no timezone is available — the prompt builder
+    then applies the default (system local timezone).
+    """
+    if timezone_spec is not None:
         try:
-            return datetime.fromtimestamp(value, tz=timezone.utc).date().isoformat()
-        except (OverflowError, OSError, ValueError) as exc:
-            raise ContextValidationError(f"timestamp epoch seconds could not be parsed: {value!r}") from exc
-
-    if not isinstance(value, str):
-        raise ContextValidationError(f"timestamp must be an ISO-8601 string or epoch seconds, got {type(value).__name__}")
-
-    text = value.strip()
-    if not text:
-        raise ContextValidationError("timestamp must not be empty")
-
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-        try:
-            return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+            return resolve_timezone(timezone_spec)
         except ValueError as exc:
-            raise ContextValidationError(f"timestamp date could not be parsed: {value!r}") from exc
-
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
-    except ValueError:
-        pass
-
-    match = _NAMED_DATE_RE.search(text)
-    if match:
-        day, month, year = match.groups()
-        for date_format in ("%d %B %Y", "%d %b %Y"):
-            try:
-                return datetime.strptime(f"{day} {month} {year}", date_format).date().isoformat()
-            except ValueError:
-                continue
-
-    try:
-        return datetime.fromtimestamp(float(text), tz=timezone.utc).date().isoformat()
-    except (OverflowError, OSError, ValueError):
-        pass
-
-    raise ContextValidationError(
-        f"timestamp could not be parsed as ISO-8601, epoch seconds, or named date: {value!r}"
-    )
+            raise ContextValidationError(str(exc)) from exc
+    for key in _TIMEZONE_METADATA_KEYS:
+        value = (metadata or {}).get(key)
+        if value is None:
+            continue
+        try:
+            return resolve_timezone(value)
+        except ValueError:
+            continue
+    return None
 
 
-def _resolve_observation_date(timestamp: Optional[Any], metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+def _resolve_observation_date(
+    timestamp: Optional[Any],
+    metadata: Optional[Dict[str, Any]],
+    timezone_spec: Optional[Any] = None,
+) -> Optional[str]:
     """Pick the extraction observation date: explicit arg first, then metadata.
 
     Metadata fallback failures are ignored (a caller putting arbitrary data in
@@ -162,13 +153,13 @@ def _resolve_observation_date(timestamp: Optional[Any], metadata: Optional[Dict[
     422 validation error from ``_coerce_observation_date``.
     """
     if timestamp is not None:
-        return _coerce_observation_date(timestamp)
+        return _coerce_observation_date(timestamp, timezone_spec)
     for key in _OBSERVATION_DATE_METADATA_KEYS:
         value = (metadata or {}).get(key)
         if value is None:
             continue
         try:
-            return _coerce_observation_date(value)
+            return _coerce_observation_date(value, timezone_spec)
         except ContextValidationError:
             continue
     return None
@@ -376,6 +367,7 @@ class MemoryApplicationService:
         expires_at: Optional[str] = None,
         prompt: Optional[str] = None,
         timestamp: Optional[Any] = None,
+        timezone: Optional[Any] = None,
         expected_revision: Optional[int] = None,
         **ids: Optional[str],
     ) -> Dict[str, Any]:
@@ -384,7 +376,9 @@ class MemoryApplicationService:
         auto routes text→append and messages→extract (design §5.1).
 
         ``timestamp`` anchors relative time expressions during extraction
-        (ISO-8601 string or Unix epoch seconds); it is ignored for append.
+        (ISO-8601 string or Unix epoch seconds); ``timezone`` selects the
+        calendar used for that anchor (IANA name or UTC offset, default:
+        system local timezone). Both are ignored for append.
         """
         if mode not in ("auto", "append", "extract"):
             raise ContextValidationError(f"mode must be auto|append|extract, got {mode!r}")
@@ -400,6 +394,7 @@ class MemoryApplicationService:
                 artifact_refs=artifact_refs or [],
                 metadata=metadata,
                 timestamp=timestamp,
+                timezone=timezone,
                 expected_revision=expected_revision,
                 prompt_override=prompt,
             )
@@ -432,6 +427,7 @@ class MemoryApplicationService:
         expected_revision: Optional[int],
         prompt_override: Optional[str] = None,
         timestamp: Optional[Any] = None,
+        timezone: Optional[Any] = None,
     ) -> Dict[str, Any]:
         if self.llm is None:
             raise CapabilityNotSupportedError("extract")
@@ -441,7 +437,8 @@ class MemoryApplicationService:
         if not transcript.strip():
             raise ContextValidationError("messages contain no textual content")
 
-        observation_date = _resolve_observation_date(timestamp, metadata)
+        observation_timezone = _resolve_observation_timezone(timezone, metadata)
+        observation_date = _resolve_observation_date(timestamp, metadata, observation_timezone)
         # Platform-aligned additive extraction: all speakers contribute, every
         # distinct topic gets a memory, and relative time references are
         # normalized against the Observation Date (design extraction-quality-plan).
@@ -459,6 +456,7 @@ class MemoryApplicationService:
         user_prompt = generate_additive_extraction_prompt(
             new_messages=messages,
             timestamp=observation_date,
+            timezone=observation_timezone,
             custom_instructions=extra or None,
             use_input_language=True,
         )

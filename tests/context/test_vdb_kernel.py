@@ -244,6 +244,55 @@ def test_remember_extract_observation_date_falls_back_to_metadata(store):
     assert "Observation Date" in user_prompt and "2023-05-08" in user_prompt
 
 
+def test_remember_extract_forwards_timezone_to_prompt(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    service.remember(
+        messages=[{"role": "user", "content": "上周三 7 点我去机场接了我妈妈。"}],
+        mode="extract",
+        user_id="u1",
+        timestamp="2026-08-16T20:30:00+00:00",
+        timezone="Asia/Shanghai",
+    )
+
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    # 20:30 UTC is already 2026-08-17 in Shanghai.
+    assert "2026-08-17 (星期一)" in user_prompt
+    assert "Asia/Shanghai" in user_prompt
+    assert "中文时间表达式处理示例" in user_prompt
+
+
+def test_remember_extract_timezone_falls_back_to_metadata(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    service.remember(
+        messages=[{"role": "user", "content": "I ran a marathon last week"}],
+        mode="extract",
+        user_id="u1",
+        metadata={"timezone": "America/New_York", "timestamp": "2026-08-16T20:30:00+00:00"},
+    )
+
+    user_prompt = llm.calls[0]["messages"][1]["content"]
+    assert "America/New_York" in user_prompt
+    assert "2026-08-16 (Sunday)" in user_prompt
+
+
+def test_remember_extract_rejects_invalid_explicit_timezone(store):
+    llm = RecordingLLM()
+    service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")
+
+    with pytest.raises(ContextValidationError):
+        service.remember(
+            messages=[{"role": "user", "content": "hello"}],
+            mode="extract",
+            user_id="u1",
+            timezone="Not/AZone",
+        )
+    assert llm.calls == []
+
+
 def test_remember_extract_includes_per_call_prompt_override(store):
     llm = RecordingLLM()
     service = MemoryApplicationService(store, embedder=FakeEmbedder(), llm=llm, storage_mode="ONLY_VDB")

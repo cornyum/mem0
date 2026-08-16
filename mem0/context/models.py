@@ -123,6 +123,14 @@ class RememberRequest(ScopeParams):
             "Grounds relative time expressions such as 'yesterday' or 'last week'."
         ),
     )
+    timezone: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "IANA timezone name (Asia/Shanghai) or UTC offset (+08:00) for the observation "
+            "timestamp. Defaults to the system local timezone."
+        ),
+    )
     prompt: Optional[str] = Field(
         default=None,
         max_length=8192,

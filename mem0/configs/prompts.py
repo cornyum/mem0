@@ -1,5 +1,13 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
+
+from mem0.utils.temporal import (
+    coerce_observation_datetime,
+    messages_contain_cjk,
+    resolve_timezone,
+    timezone_label,
+    weekday_name,
+)
 
 MEMORY_ANSWER_PROMPT = """
 You are an expert at answering questions based on the provided memories. Your task is to provide accurate and concise answers to the questions by leveraging the information given in the memories.
@@ -523,7 +531,7 @@ Recent messages (up to 20) preceding New Messages. Use to resolve references and
 
 ## Observation Date
 
-When the conversation actually took place (e.g., "2023-05-24"). This is your ONLY temporal anchor for resolving time references.
+When the conversation actually took place, shown as ``YYYY-MM-DD (weekday)`` together with its timezone (e.g., "2023-05-24 (Wednesday), Asia/Shanghai (UTC+08:00)"). This is your ONLY temporal anchor for resolving time references.
 
 Resolve ALL relative references against Observation Date:
 - "yesterday" → day before Observation Date
@@ -531,13 +539,20 @@ Resolve ALL relative references against Observation Date:
 - "next month" → month following Observation Date
 - "recently" → shortly before Observation Date
 - "just finished", "today" → on or near Observation Date
+- Chinese equivalents ("昨天/前天/大前天/上周X/下周X/N天前/N天后/今天/明天/后天") follow the same rule.
+
+For every extracted absolute date also state the weekday and verify it against the actual calendar — the printed date and weekday MUST agree. Example output formats:
+- English: "on Wednesday, August 12, 2026 at 7 am"
+- Chinese: "2026年8月12日（星期三）早上7点"
+
+All date arithmetic is performed in the Observation timezone. Never switch to another timezone. If the input says "7点" without 上午/下午/晚上 and the context does not disambiguate it, keep the exact clock time and add "（上午/下午未说明）" instead of guessing.
 
 CRITICAL: "User went to Paris last week" is useless 6 months later. "User went to Paris the week of May 15, 2023" is meaningful forever. Always ground relative references to specific dates.
 
 
 ## Current Date
 
-Today's system date. May be years after Observation Date. Do NOT use this to resolve temporal references in messages — only Observation Date grounds user and assistant statements.
+Today's system date, also expressed in the observation timezone. May be years after Observation Date. Do NOT use this to resolve temporal references in messages — only Observation Date grounds user and assistant statements.
 
 
 ## Optional Inputs
@@ -632,7 +647,7 @@ Every memory must be understandable on its own. Replace all pronouns with specif
 1-2 sentences per memory (up to 3 for content with multiple proper nouns, specific quantities, or enumerated items). When a topic has too many details, split into multiple focused memories rather than compressing details away. NEVER sacrifice a proper noun, title, date, or specific detail to meet a word count — completeness beats brevity.
 
 ### Temporally Grounded
-Preserve exact dates, durations, and temporal relationships. Convert relative → absolute using Observation Date (NOT Current Date). NEVER convert absolute → vague. "18 days" stays "18 days", not "some time."
+Preserve exact dates, durations, and temporal relationships. Convert relative → absolute using Observation Date (NOT Current Date). NEVER convert absolute → vague. "18 days" stays "18 days", not "some time." Absolute dates must include the matching weekday (e.g. "2026年8月12日（星期三）"); if the computed date and weekday disagree, trust the calendar and recompute the date, never emit a mismatched pair.
 
 ### Numerically Precise
 Preserve exact quantities as stated. "416 pages" stays "416 pages", not "about 400 pages."
@@ -1004,13 +1019,76 @@ def _format_new_messages(new_messages):
     return json.dumps(new_messages or [], ensure_ascii=False)
 
 
-def _resolve_dates(current_date=None, observation_date=None):
-    """Resolve current and observation dates, defaulting to today."""
+def _format_cn_date(day):
+    """Format a date the way extracted Chinese memories must print it."""
+    return f"{day.year}年{day.month}月{day.day}日（{weekday_name(day, 'zh')}）"
+
+
+def _previous_week_weekday(day, target_weekday):
+    """The target weekday in the previous Monday-based calendar week."""
+    this_week_monday = day - timedelta(days=day.weekday())
+    return this_week_monday - timedelta(days=7) + timedelta(days=target_weekday)
+
+
+def _render_chinese_temporal_fewshot(observation_dt):
+    """Chinese temporal examples computed from the actual Observation Date.
+
+    Examples are generated from the real observation date (not hard-coded
+    dates) so a model cannot copy a stale date out of an example whose text
+    happens to match the new input.
+    """
+    day = observation_dt.date()
+    last_wednesday = _previous_week_weekday(day, 2)
+    two_days_ago = day - timedelta(days=2)
+    three_days_later = day + timedelta(days=3)
+    obs_text = f"{day.isoformat()}（{weekday_name(day, 'zh')}）"
+    return f"""
+## 中文时间表达式处理示例（Chinese temporal few-shot）
+
+规则：
+1. 所有相对时间都以 Observation Date 为锚点换算成绝对日期；时间计算使用 Observation 时区。
+2. 绝对日期统一写成 “YYYY年M月D日（星期X）”，日期与星期必须一致。
+3. “上周X”指上一个自然周（周一开始）的星期X；不是最近过去的那个星期X。
+4. 保留原文中的上午/下午/晚上；若原文只有 “7点” 且上下文无法判断，写 “7点（上午/下午未说明）”，禁止自行推断为早上或晚上。
+5. 过去事件用完成语气，未来事件保留计划语气（“计划/将/已预约”）。
+
+输入: [{{"role": "user", "content": "上周三 7 点我去机场接了我妈妈。"}}]
+观察日期: {obs_text}
+输出: {{"memory": [{{"id": "0", "text": "用户在{_format_cn_date(last_wednesday)}7点（上午/下午未说明）去机场接了妈妈。"}}]}}
+
+输入: [{{"role": "user", "content": "前天下午我在公司开了一个重要会议。"}}]
+观察日期: {obs_text}
+输出: {{"memory": [{{"id": "0", "text": "用户在{_format_cn_date(two_days_ago)}下午在公司召开了一个重要会议。"}}]}}
+
+输入: [{{"role": "user", "content": "3天后我要去北京出差。"}}]
+观察日期: {obs_text}
+输出: {{"memory": [{{"id": "0", "text": "用户计划{_format_cn_date(three_days_later)}前往北京出差。"}}]}}
+"""
+
+
+def _prompt_datetime(value, tz, language="en"):
+    """Format a datetime as ``YYYY-MM-DD (weekday) — Zone (UTC±HH:MM)``."""
+    return (
+        f"{value.date().isoformat()} ({weekday_name(value.date(), language)})"
+        f" — {timezone_label(tz, value)}"
+    )
+
+
+def _resolve_dates(current_date=None, observation_date=None, timezone=None):
+    """Resolve current/observation datetimes in one timezone.
+
+    ``None`` timezone means the system local timezone, preserving the default
+    behaviour callers already relied on. ``observation_date`` is kept for
+    backward compatibility with older keyword-only call sites.
+    """
+    tz = resolve_timezone(timezone)
+    now = datetime.now(tz)
     if current_date is None:
-        current_date = datetime.now(timezone.utc).date().isoformat()
-    if observation_date is None:
-        observation_date = current_date
-    return current_date, observation_date
+        current_dt = now
+    else:
+        current_dt = coerce_observation_datetime(current_date, tz)
+    observation_dt = now if observation_date is None else coerce_observation_datetime(observation_date, tz)
+    return current_dt, observation_dt, tz
 
 
 def generate_additive_extraction_prompt(
@@ -1024,13 +1102,25 @@ def generate_additive_extraction_prompt(
     timestamp=None,
     custom_instructions=None,
     use_input_language=False,
+    timezone=None,
 ):
     """Build the user prompt for additive (ADD-only) extraction with linking.
 
     Pairs with ADDITIVE_EXTRACTION_PROMPT system prompt.
     The LLM will produce only ADD operations, with optional linked_memory_ids.
+
+    ``timezone`` accepts an IANA name ("Asia/Shanghai"), a UTC offset
+    ("+08:00"), or None for the system local timezone. It is applied to both
+    the current date and the observation timestamp so the printed date,
+    weekday, and UTC offset are consistent.
     """
-    current_date, observation_date = _resolve_dates(current_date, timestamp)
+    current_dt, observation_dt, tz = _resolve_dates(current_date, timestamp, timezone)
+    language = "zh" if use_input_language and messages_contain_cjk(new_messages) else "en"
+    observation_line = (
+        f"{_prompt_datetime(observation_dt, tz, language)}\n"
+        "All relative time expressions in New Messages are computed against this local calendar date."
+    )
+    current_line = f"{_prompt_datetime(current_dt, tz, language)}"
 
     sections = []
     sections.append(f"## Summary\n{_format_summary(summary)}")
@@ -1038,8 +1128,8 @@ def generate_additive_extraction_prompt(
     sections.append(f"## Recently Extracted Memories\n{_serialize_memories(recently_extracted_memories)}")
     sections.append(f"## Existing Memories\n{_serialize_memories(existing_memories)}")
     sections.append(f"## New Messages\n{_format_new_messages(new_messages)}")
-    sections.append(f"## Observation Date\n{observation_date}")
-    sections.append(f"## Current Date\n{current_date}")
+    sections.append(f"## Observation Date\n{observation_line}")
+    sections.append(f"## Current Date\n{current_line}")
 
     if custom_instructions:
         sections.append(f"## Custom Instructions\n{custom_instructions}")
@@ -1057,6 +1147,8 @@ def generate_additive_extraction_prompt(
             "7. For Japanese: explicitly resolve omitted subjects using conversation context.\n"
             "8. For CJK languages: maintain appropriate formality level from the source text."
         )
+        if messages_contain_cjk(new_messages):
+            sections.append(_render_chinese_temporal_fewshot(observation_dt))
 
     sections.append("# Output:")
     return "\n\n".join(sections)
