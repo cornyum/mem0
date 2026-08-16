@@ -54,7 +54,8 @@
 
 #### 3.2.1 摄入
 
-- 数据集：HF `Mohammadta/BEAM` `data/100K-00000-of-00001.parquet` 转为 `server/scripts/benchmarks/beam/dataset/beam_100k.json`（本地缓存，不提交）。
+- 数据集：HF `Mohammadta/BEAM` + `Mohammadta/BEAM-10M` **完整四个 split 已全部自行下载**并记录 SHA-256（`server/scripts/benchmarks/beam/dataset/beam_*.parquet`，100K/500K/1M/10M = 20/35/35/10 conversations）。**BEAM v1 执行范围 = 100K bucket 全部 20 conversations（400 题）**；500K/1M/10M 已缓存留待 v2（其摄入与裁判成本高一个量级，v1 先固定 100K 与官方最小 bucket 全量可比）。
+- 100K split 转为 `server/scripts/benchmarks/beam/dataset/beam_100k.json`（本地缓存，不提交）。
 - 20 conversations，每个 chat 是 3 个带 `time_anchor` 的 batch（共约 188-200 turns/conv）。
 - 写入 scope：`tenant_id=bench-beam-v1`，`user_id=beam_100k_{conversation_id}`。
 - batch 内按 **5 turns/chunk**（v2 基线 chunk5）切分；`timestamp=time_anchor`（epoch），不传 timezone（与 v2 LOCOMO 一致）；`categories=["beam"]`、`metadata={benchmark, conversation_id, batch_idx}`。
