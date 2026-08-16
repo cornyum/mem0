@@ -1,5 +1,7 @@
 # LOCOMO Benchmark v2 报告（抽取 v2 × `/v1/memory/*`）
 
+> **消融矩阵已完成**：recall 通道 / rerank / chunk-size / 抽取模型对比见 [`design/locomo-benchmark-v2-ablation-report.md`](locomo-benchmark-v2-ablation-report.md)。
+
 > 运行日期：2026-08-16 · 代码基线：`feature/memory-research` @ `7f3f6fa3`
 > 结果文件：`server/scripts/benchmarks/locomo/results/v2-full-chunk5-extract-rerank.json`
 > 方案：`design/locomo-benchmark-v2-plan.md` · 对比基线：`design/locomo-benchmark-report.md`（v1）
